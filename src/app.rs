@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use ratatui::text::Text;
-use ratatui::widgets::ListState;
+use ratatui::widgets::{ListState, Paragraph, Wrap};
 
 use crate::entry::Entry;
 use crate::node_source::NodeSource;
@@ -23,6 +23,10 @@ pub struct App {
     root_label: String,
 
     pub show_hidden: bool,
+    /// Whether preview text wraps at the pane width. Off by default so long
+    /// lines (e.g. logs, minified files) scroll horizontally-free rather
+    /// than reflowing.
+    pub wrap_preview: bool,
 
     /// Stack of opened directories, from the fixed start dir (index 0) down
     /// to the currently focused directory (last). Entering a directory
@@ -39,6 +43,11 @@ pub struct App {
     /// Height of the preview pane's content area (inside its border), as
     /// measured by the last render. Used to clamp/compute scroll offsets.
     pub preview_viewport_height: u16,
+    /// Width of the preview pane's content area (inside its border), as
+    /// measured by the last render. Used alongside `wrap_preview` to work
+    /// out how many rows the text actually renders to once wrapped, since
+    /// wrapped lines can outnumber raw text lines.
+    pub preview_viewport_width: u16,
 
     cursor_memory: HashMap<Vec<String>, usize>,
     pub message: Option<String>,
@@ -56,12 +65,14 @@ impl App {
             source,
             root_label,
             show_hidden: false,
+            wrap_preview: false,
             columns: Vec::new(),
             list_state: ListState::default(),
             preview: Text::default(),
             preview_focused: false,
             preview_scroll: 0,
             preview_viewport_height: 0,
+            preview_viewport_width: 0,
             cursor_memory: HashMap::new(),
             message: None,
             message_expires_at: None,
@@ -169,7 +180,13 @@ impl App {
     }
 
     fn preview_max_scroll(&self) -> u16 {
-        (self.preview.lines.len() as u16).saturating_sub(self.preview_viewport_height)
+        let total_lines = if self.wrap_preview {
+            let para = Paragraph::new(self.preview.clone()).wrap(Wrap { trim: false });
+            para.line_count(self.preview_viewport_width) as u16
+        } else {
+            self.preview.lines.len() as u16
+        };
+        total_lines.saturating_sub(self.preview_viewport_height)
     }
 
     /// Moves keyboard focus onto the preview pane. Only meaningful for file
@@ -275,6 +292,11 @@ impl App {
         self.set_message(None);
         self.sync_focused_list_state();
         self.update_preview();
+    }
+
+    pub fn toggle_wrap(&mut self) {
+        self.wrap_preview = !self.wrap_preview;
+        self.preview_scroll = self.preview_scroll.min(self.preview_max_scroll());
     }
 
     pub fn toggle_hidden(&mut self) {

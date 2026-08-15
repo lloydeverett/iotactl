@@ -11,6 +11,8 @@ const COLUMN_WIDTH: u16 = 24;
 const FOCUSED_COLUMN_WIDTH: u16 = 40;
 /// Minimum width reserved for the trailing preview column.
 const PREVIEW_MIN_WIDTH: u16 = 24;
+/// Minimum width reserved for the preview column when it's focused.
+const PREVIEW_FOCUSED_MIN_WIDTH: u16 = 80;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let root = Layout::default()
@@ -63,7 +65,12 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
         FOCUSED_COLUMN_WIDTH
     };
 
-    let preview_width = PREVIEW_MIN_WIDTH.min(area.width);
+    let preview_min_width = if app.preview_focused {
+        PREVIEW_FOCUSED_MIN_WIDTH
+    } else {
+        PREVIEW_MIN_WIDTH
+    };
+    let preview_width = preview_min_width.min(area.width);
     let available_for_columns = area.width.saturating_sub(preview_width);
     let mut remaining = available_for_columns.saturating_sub(last_column_width);
     let mut visible = 1usize.min(total);
@@ -130,11 +137,14 @@ fn draw_preview_column(f: &mut Frame, area: Rect, app: &mut App) {
         None => app.cwd(),
     };
     app.preview_viewport_height = area.height.saturating_sub(2);
+    app.preview_viewport_width = area.width.saturating_sub(2);
     let block = titled_box(title, app.preview_focused);
-    let para = Paragraph::new(app.preview.clone())
+    let mut para = Paragraph::new(app.preview.clone())
         .block(block)
-        .wrap(Wrap { trim: false })
         .scroll((app.preview_scroll, 0));
+    if app.wrap_preview {
+        para = para.wrap(Wrap { trim: false });
+    }
     f.render_widget(para, area);
 }
 
@@ -150,14 +160,14 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled(msg.clone(), Style::default().fg(Color::Red)))
     } else if app.preview_focused {
         Line::from(Span::styled(
-            "j/k scroll • gg/G top/bottom • h back • q quit",
+            "j/k scroll • gg/G top/bottom • w wrap • h back • q quit",
             Style::default().fg(Color::DarkGray),
         ))
     } else {
         Line::from(vec![
             count_span,
             Span::styled(
-                "h/j/k/l move • gg/G top/bottom • H hidden • q quit",
+                "h/j/k/l move • gg/G top/bottom • H hidden • w wrap • q quit",
                 Style::default().fg(Color::DarkGray),
             ),
         ])

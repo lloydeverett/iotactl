@@ -147,6 +147,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> io::R
                 }
             }
             KeyCode::Char('H') => app.toggle_hidden(),
+            KeyCode::Char('w') => app.toggle_wrap(),
             _ => {}
         }
 
