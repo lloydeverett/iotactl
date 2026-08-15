@@ -27,10 +27,15 @@ fn main() -> io::Result<()> {
         .unwrap_or_else(|| env::current_dir().expect("failed to get current directory"))
         .canonicalize()?;
 
+    let root_label = start_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| start_dir.display().to_string());
+
     let mut terminal = setup_terminal()?;
     let result = run(
         &mut terminal,
-        App::new(Vec::new(), Box::new(FsSource::new(start_dir))),
+        App::new(Vec::new(), root_label, Box::new(FsSource::new(start_dir))),
     );
     restore_terminal(&mut terminal)?;
     result
@@ -76,21 +81,71 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> io::R
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.should_quit = true
             }
-            KeyCode::Char('j') | KeyCode::Down => app.move_selection(1),
-            KeyCode::Char('k') | KeyCode::Up => app.move_selection(-1),
-            KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => app.go_up(),
-            KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => app.enter(),
-            KeyCode::PageDown => app.move_selection(PAGE_SIZE),
-            KeyCode::PageUp => app.move_selection(-PAGE_SIZE),
+            KeyCode::Char('j') | KeyCode::Down => {
+                if app.preview_focused {
+                    app.preview_scroll_by(1)
+                } else {
+                    app.move_selection(1)
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if app.preview_focused {
+                    app.preview_scroll_by(-1)
+                } else {
+                    app.move_selection(-1)
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
+                if app.preview_focused {
+                    app.unfocus_preview()
+                } else {
+                    app.go_up()
+                }
+            }
+            KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => {
+                if !app.preview_focused {
+                    app.enter()
+                }
+            }
+            KeyCode::PageDown => {
+                if app.preview_focused {
+                    app.preview_scroll_by(PAGE_SIZE)
+                } else {
+                    app.move_selection(PAGE_SIZE)
+                }
+            }
+            KeyCode::PageUp => {
+                if app.preview_focused {
+                    app.preview_scroll_by(-PAGE_SIZE)
+                } else {
+                    app.move_selection(-PAGE_SIZE)
+                }
+            }
             KeyCode::Char('g') => {
                 if was_pending_g {
-                    app.select_first();
+                    if app.preview_focused {
+                        app.preview_scroll_top();
+                    } else {
+                        app.select_first();
+                    }
                 } else {
                     app.pending_g = true;
                 }
             }
-            KeyCode::Char('G') | KeyCode::End => app.select_last(),
-            KeyCode::Home => app.select_first(),
+            KeyCode::Char('G') | KeyCode::End => {
+                if app.preview_focused {
+                    app.preview_scroll_bottom()
+                } else {
+                    app.select_last()
+                }
+            }
+            KeyCode::Home => {
+                if app.preview_focused {
+                    app.preview_scroll_top()
+                } else {
+                    app.select_first()
+                }
+            }
             KeyCode::Char('H') => app.toggle_hidden(),
             _ => {}
         }

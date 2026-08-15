@@ -4,41 +4,48 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use crate::app::App;
 use crate::entry::Entry;
 
-/// Fixed width of each opened directory column, in terminal cells.
-const COLUMN_WIDTH: u16 = 32;
+/// Width of a non-focused opened directory column, in terminal cells.
+const COLUMN_WIDTH: u16 = 24;
+/// Width of the focused directory column. Wider than the others so the
+/// column you're actively navigating gets more room.
+const FOCUSED_COLUMN_WIDTH: u16 = 40;
 /// Minimum width reserved for the trailing preview column.
 const PREVIEW_MIN_WIDTH: u16 = 24;
-/// Gap between adjacent columns (and between the last column and the
-/// preview column).
-const COLUMN_SPACING: u16 = 1;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let root = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(3),
-            Constraint::Length(2),
-        ])
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
         .split(f.area());
 
-    draw_header(f, root[0], app);
-    draw_columns(f, root[1], app);
-    draw_footer(f, root[2], app);
+    draw_columns(f, root[0], app);
+    draw_footer(f, root[1], app);
 }
 
-fn draw_header(f: &mut Frame, area: Rect, app: &App) {
-    let path = Line::from(vec![Span::styled(
-        app.cwd(),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )]);
-    let block = Block::default()
-        .borders(Borders::BOTTOM)
-        .border_style(Style::default().fg(Color::DarkGray));
-    let para = Paragraph::new(path).block(block);
-    f.render_widget(para, area);
+/// Border/title style for a box, depending on whether it holds the
+/// currently focused column.
+fn box_style(is_focused: bool) -> (Style, Style) {
+    if is_focused {
+        (
+            Style::default().fg(Color::Cyan),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
+        )
+    }
+}
+
+fn titled_box(title: String, is_focused: bool) -> Block<'static> {
+    let (border_style, title_style) = box_style(is_focused);
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Line::from(Span::styled(format!(" {title} "), title_style)))
 }
 
 /// Renders the Miller-columns stack of opened directories, followed by a
@@ -48,24 +55,43 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
     let total = app.columns.len();
 
+    // The last column is always visible; it's the focused one unless focus
+    // has moved to the preview pane.
+    let last_column_width = if app.preview_focused {
+        COLUMN_WIDTH
+    } else {
+        FOCUSED_COLUMN_WIDTH
+    };
+
     let preview_width = PREVIEW_MIN_WIDTH.min(area.width);
     let available_for_columns = area.width.saturating_sub(preview_width);
-    let column_stride = COLUMN_WIDTH + COLUMN_SPACING;
-    let max_visible = ((available_for_columns / column_stride).max(1) as usize).min(total);
-    let visible = max_visible;
+    let mut remaining = available_for_columns.saturating_sub(last_column_width);
+    let mut visible = 1usize.min(total);
+    while visible < total && remaining >= COLUMN_WIDTH {
+        remaining -= COLUMN_WIDTH;
+        visible += 1;
+    }
     let start_idx = total - visible;
 
-    let mut constraints: Vec<Constraint> = vec![Constraint::Length(COLUMN_WIDTH); visible];
+    let mut constraints: Vec<Constraint> = Vec::with_capacity(visible + 1);
+    for offset in 0..visible {
+        let col_idx = start_idx + offset;
+        let width = if col_idx == total - 1 {
+            last_column_width
+        } else {
+            COLUMN_WIDTH
+        };
+        constraints.push(Constraint::Length(width));
+    }
     constraints.push(Constraint::Min(preview_width));
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(constraints)
-        .spacing(COLUMN_SPACING)
         .split(area);
 
     for offset in 0..visible {
         let col_idx = start_idx + offset;
-        let is_focused = col_idx == total - 1;
+        let is_focused = col_idx == total - 1 && !app.preview_focused;
         let column = &app.columns[col_idx];
 
         let items: Vec<ListItem> = column.entries.iter().map(entry_item).collect();
@@ -82,7 +108,8 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
                 .fg(Color::Rgb(210, 212, 216))
                 .add_modifier(Modifier::BOLD)
         };
-        let list = List::new(items).highlight_style(highlight);
+        let block = titled_box(app.path_label(&column.id), is_focused);
+        let list = List::new(items).block(block).highlight_style(highlight);
 
         if is_focused {
             app.list_state.select(selected);
@@ -97,10 +124,17 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
     draw_preview_column(f, chunks[visible], app);
 }
 
-fn draw_preview_column(f: &mut Frame, area: Rect, app: &App) {
+fn draw_preview_column(f: &mut Frame, area: Rect, app: &mut App) {
+    let title = match app.selected_entry() {
+        Some(entry) => app.path_label(&entry.id),
+        None => app.cwd(),
+    };
+    app.preview_viewport_height = area.height.saturating_sub(2);
+    let block = titled_box(title, app.preview_focused);
     let para = Paragraph::new(app.preview.clone())
-        .block(Block::default())
-        .wrap(Wrap { trim: false });
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((app.preview_scroll, 0));
     f.render_widget(para, area);
 }
 
@@ -114,6 +148,11 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
 
     let text = if let Some(msg) = &app.message {
         Line::from(Span::styled(msg.clone(), Style::default().fg(Color::Red)))
+    } else if app.preview_focused {
+        Line::from(Span::styled(
+            "j/k scroll • gg/G top/bottom • h back • q quit",
+            Style::default().fg(Color::DarkGray),
+        ))
     } else {
         Line::from(vec![
             count_span,
@@ -123,10 +162,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             ),
         ])
     };
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::DarkGray));
-    let para = Paragraph::new(text).block(block);
+    let para = Paragraph::new(text);
     f.render_widget(para, area);
 }
 

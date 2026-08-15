@@ -17,6 +17,11 @@ pub struct Column {
 pub struct App {
     source: Box<dyn NodeSource>,
 
+    /// Display name for the root node (id == []), e.g. "iotactl", since it
+    /// has no path segment of its own to name it. Used as that column's
+    /// title.
+    root_label: String,
+
     pub show_hidden: bool,
 
     /// Stack of opened directories, from the fixed start dir (index 0) down
@@ -26,6 +31,14 @@ pub struct App {
     pub list_state: ListState,
 
     pub preview: Text<'static>,
+    /// Whether keyboard focus is on the preview pane rather than the
+    /// column stack. Only reachable for file entries; directories are
+    /// opened as a new column instead.
+    pub preview_focused: bool,
+    pub preview_scroll: u16,
+    /// Height of the preview pane's content area (inside its border), as
+    /// measured by the last render. Used to clamp/compute scroll offsets.
+    pub preview_viewport_height: u16,
 
     cursor_memory: HashMap<Vec<String>, usize>,
     pub message: Option<String>,
@@ -38,13 +51,17 @@ pub struct App {
 const TOAST_DURATION: Duration = Duration::from_secs(2);
 
 impl App {
-    pub fn new(start: Vec<String>, source: Box<dyn NodeSource>) -> Self {
+    pub fn new(start: Vec<String>, root_label: String, source: Box<dyn NodeSource>) -> Self {
         let mut app = App {
             source,
+            root_label,
             show_hidden: false,
             columns: Vec::new(),
             list_state: ListState::default(),
             preview: Text::default(),
+            preview_focused: false,
+            preview_scroll: 0,
+            preview_viewport_height: 0,
             cursor_memory: HashMap::new(),
             message: None,
             message_expires_at: None,
@@ -129,7 +146,18 @@ impl App {
     }
 
     pub fn cwd(&self) -> String {
-        format!("/{}", self.focused().id.join("/"))
+        self.path_label(&self.focused().id)
+    }
+
+    /// Display name for a node id: just the node's own name, e.g.
+    /// `path_label(&["a", "b"])` is `"b"`. The root (id == []) has no name
+    /// of its own, so it falls back to `root_label`. Used as the title of
+    /// each column's and the preview's box.
+    pub fn path_label(&self, id: &[String]) -> String {
+        match id.last() {
+            Some(name) => name.clone(),
+            None => self.root_label.clone(),
+        }
     }
 
     fn update_preview(&mut self) {
@@ -137,6 +165,38 @@ impl App {
             None => Text::default(),
             Some(entry) => self.source.preview_tui(&entry.id, self.show_hidden),
         };
+        self.preview_scroll = 0;
+    }
+
+    fn preview_max_scroll(&self) -> u16 {
+        (self.preview.lines.len() as u16).saturating_sub(self.preview_viewport_height)
+    }
+
+    /// Moves keyboard focus onto the preview pane. Only meaningful for file
+    /// entries: directories are opened as a new column via `enter` instead.
+    pub fn focus_preview(&mut self) {
+        if matches!(self.selected_entry(), Some(entry) if !entry.is_dir) {
+            self.preview_focused = true;
+            self.preview_scroll = 0;
+        }
+    }
+
+    pub fn unfocus_preview(&mut self) {
+        self.preview_focused = false;
+    }
+
+    pub fn preview_scroll_by(&mut self, delta: i32) {
+        let max = self.preview_max_scroll() as i32;
+        let current = self.preview_scroll as i32;
+        self.preview_scroll = (current + delta).clamp(0, max) as u16;
+    }
+
+    pub fn preview_scroll_top(&mut self) {
+        self.preview_scroll = 0;
+    }
+
+    pub fn preview_scroll_bottom(&mut self) {
+        self.preview_scroll = self.preview_max_scroll();
     }
 
     pub fn selected_entry(&self) -> Option<&Entry> {
@@ -200,7 +260,7 @@ impl App {
             self.sync_focused_list_state();
             self.update_preview();
         } else {
-            self.set_message(Some(format!("Not a directory: {}", entry.name)));
+            self.focus_preview();
         }
     }
 
@@ -211,12 +271,14 @@ impl App {
             return;
         }
         self.columns.pop();
+        self.preview_focused = false;
         self.set_message(None);
         self.sync_focused_list_state();
         self.update_preview();
     }
 
     pub fn toggle_hidden(&mut self) {
+        self.preview_focused = false;
         self.show_hidden = !self.show_hidden;
         let ids: Vec<Vec<String>> = self.columns.iter().map(|c| c.id.clone()).collect();
         let mut new_columns = Vec::with_capacity(ids.len());
