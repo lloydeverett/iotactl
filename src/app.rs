@@ -89,7 +89,11 @@ pub struct App {
     /// wrapped lines can outnumber raw text lines.
     pub preview_viewport_width: u16,
 
-    cursor_memory: HashMap<Vec<String>, usize>,
+    /// Remembers the *name* (not index) of the last-selected entry in each
+    /// column, so the cursor can be re-found after a reload that shuffles
+    /// indices — e.g. toggling hidden files changes which index a given
+    /// entry sits at.
+    cursor_memory: HashMap<Vec<String>, String>,
     pub message: Option<String>,
     message_expires_at: Option<Instant>,
     pub should_quit: bool,
@@ -148,6 +152,18 @@ impl App {
         app
     }
 
+    /// Resolves the remembered selection for column `id` against a freshly
+    /// loaded `entries` list. Looks the entry up by name first, since a
+    /// reload (e.g. toggling hidden files) can shuffle indices; falls back
+    /// to index 0 if the remembered entry is no longer present (e.g. it was
+    /// a hidden file and hidden files were just turned off).
+    fn resolve_selection(&self, id: &[String], entries: &[Entry]) -> usize {
+        match self.cursor_memory.get(id) {
+            Some(name) => entries.iter().position(|e| &e.name == name).unwrap_or(0),
+            None => 0,
+        }
+    }
+
     /// Turns a `read_dir` result into a `Column` plus an optional error
     /// toast message, applying the remembered cursor position.
     fn column_from_result(
@@ -155,13 +171,12 @@ impl App {
         id: Vec<String>,
         result: io::Result<Vec<Entry>>,
     ) -> (Column, Option<String>) {
-        let remembered = self.cursor_memory.get(&id).copied().unwrap_or(0);
         match result {
             Ok(entries) => {
                 let selected = if entries.is_empty() {
                     None
                 } else {
-                    Some(remembered.min(entries.len() - 1))
+                    Some(self.resolve_selection(&id, &entries))
                 };
                 (
                     Column {
@@ -343,7 +358,8 @@ impl App {
             return;
         }
         col.selected = Some(next);
-        self.cursor_memory.insert(id, next);
+        let name = col.entries[next].name.clone();
+        self.cursor_memory.insert(id, name);
         self.sync_focused_list_state();
         self.dispatch_preview_update();
     }
@@ -355,7 +371,8 @@ impl App {
             return;
         }
         col.selected = Some(0);
-        self.cursor_memory.insert(id, 0);
+        let name = col.entries[0].name.clone();
+        self.cursor_memory.insert(id, name);
         self.sync_focused_list_state();
         self.dispatch_preview_update();
     }
@@ -368,7 +385,8 @@ impl App {
         }
         let last = col.entries.len() - 1;
         col.selected = Some(last);
-        self.cursor_memory.insert(id, last);
+        let name = col.entries[last].name.clone();
+        self.cursor_memory.insert(id, name);
         self.sync_focused_list_state();
         self.dispatch_preview_update();
     }
@@ -476,8 +494,7 @@ impl App {
                         )));
                     }
                     Ok(entries) => {
-                        let remembered = self.cursor_memory.get(&id).copied().unwrap_or(0);
-                        let selected = Some(remembered.min(entries.len() - 1));
+                        let selected = Some(self.resolve_selection(&id, &entries));
                         if let Some(col) = self.columns.last_mut() {
                             col.entries = entries;
                             col.selected = selected;

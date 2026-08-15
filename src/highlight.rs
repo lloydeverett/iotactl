@@ -38,7 +38,12 @@ const RECOGNIZED_NAMES: &[&str] = &[
     "type.builtin",
     "variable.builtin",
     "variable.parameter",
-    "text.title",
+    "text.title.1",
+    "text.title.2",
+    "text.title.3",
+    "text.title.4",
+    "text.title.5",
+    "text.title.6",
     "text.literal",
     "text.uri",
     "text.reference",
@@ -58,7 +63,27 @@ fn style_for(name: &str) -> Option<Style> {
         "constant" | "constant.builtin" | "label" => Color::LightRed,
         "variable.builtin" | "variable.parameter" => Color::LightMagenta,
         "property" | "string.special.key" => Color::White,
-        "text.title" => return Some(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        // Warm (top-level, most prominent) fading to cool (deepest nesting,
+        // least prominent), rainbow-order: red, yellow, green, cyan, blue,
+        // magenta.
+        "text.title.1" => {
+            return Some(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+        }
+        "text.title.2" => {
+            return Some(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        }
+        "text.title.3" => {
+            return Some(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        }
+        "text.title.4" => {
+            return Some(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        }
+        "text.title.5" => {
+            return Some(Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))
+        }
+        "text.title.6" => {
+            return Some(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+        }
         "text.literal" => Color::Green,
         "text.uri" => Color::Blue,
         "text.reference" => Color::Cyan,
@@ -147,10 +172,36 @@ const MARKDOWN_BLOCK_INJECTIONS_QUERY: &str = r#"
 /// language info, so it's never a target of an injection either.
 const MARKDOWN_BLOCK_HIGHLIGHTS_QUERY: &str = r#"
 (atx_heading
-  (inline) @text.title)
+  (atx_h1_marker)
+  heading_content: (inline) @text.title.1)
+
+(atx_heading
+  (atx_h2_marker)
+  heading_content: (inline) @text.title.2)
+
+(atx_heading
+  (atx_h3_marker)
+  heading_content: (inline) @text.title.3)
+
+(atx_heading
+  (atx_h4_marker)
+  heading_content: (inline) @text.title.4)
+
+(atx_heading
+  (atx_h5_marker)
+  heading_content: (inline) @text.title.5)
+
+(atx_heading
+  (atx_h6_marker)
+  heading_content: (inline) @text.title.6)
 
 (setext_heading
-  (paragraph) @text.title)
+  heading_content: (paragraph) @text.title.1
+  (setext_h1_underline))
+
+(setext_heading
+  heading_content: (paragraph) @text.title.2
+  (setext_h2_underline))
 
 [
   (atx_h1_marker)
@@ -746,6 +797,73 @@ mod tests {
                 .iter()
                 .any(|(t, s)| *t == "value" && s.fg == Some(Color::Green)),
             "expected frontmatter value highlighted as a string (green), got {styled_texts:?}"
+        );
+    }
+
+    #[test]
+    fn heading_levels_get_distinct_colors() {
+        let path = Path::new("sample.md");
+        let text = "# One\n## Two\n### Three\n#### Four\n##### Five\n###### Six\n";
+        let lines = highlight(path, text).unwrap();
+        let heading_style = |line: usize, text_content: &str| {
+            lines[line]
+                .spans
+                .iter()
+                .find(|s| s.content.as_ref() == text_content)
+                .unwrap_or_else(|| panic!("no span {text_content:?} on line {line}: {:?}", lines[line].spans))
+                .style
+        };
+
+        let colors: Vec<Option<Color>> = vec![
+            heading_style(0, "One").fg,
+            heading_style(1, "Two").fg,
+            heading_style(2, "Three").fg,
+            heading_style(3, "Four").fg,
+            heading_style(4, "Five").fg,
+            heading_style(5, "Six").fg,
+        ];
+
+        for c in &colors {
+            assert!(c.is_some(), "expected every heading level to have a color, got {colors:?}");
+        }
+        let unique: std::collections::HashSet<_> = colors.iter().collect();
+        assert_eq!(
+            unique.len(),
+            colors.len(),
+            "expected all six heading levels to have distinct colors, got {colors:?}"
+        );
+    }
+
+    #[test]
+    fn setext_headings_get_distinct_colors() {
+        let path = Path::new("sample.md");
+        let text = "Title One\n=========\n\nTitle Two\n---------\n";
+        let lines = highlight(path, text).unwrap();
+
+        let one_color = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "Title One")
+            .expect("Title One span")
+            .style
+            .fg;
+        // Blank line then underline separates the two setext headings.
+        let two_line = lines
+            .iter()
+            .position(|l| l.spans.iter().any(|s| s.content.as_ref() == "Title Two"))
+            .expect("Title Two line");
+        let two_color = lines[two_line]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "Title Two")
+            .expect("Title Two span")
+            .style
+            .fg;
+
+        assert!(one_color.is_some() && two_color.is_some());
+        assert_ne!(
+            one_color, two_color,
+            "expected setext h1 and h2 to have distinct colors"
         );
     }
 }
