@@ -1,19 +1,9 @@
 
+# Issues
+
+Known or potential issues to look into (actual bugs or usability concerns).
+
 ## Look into how the color scheme renders in different terminals
-
-```json
-[
-    1, 2, 3, {"foo": "bar"}
-]
-```
-
-```yaml
-foo: bar
-```
-
-```python
-print('hello')
-```
 
 Can we try to make it always be pretty by default, perhaps using true colour?
 
