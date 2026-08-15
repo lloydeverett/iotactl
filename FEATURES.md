@@ -21,6 +21,12 @@ When using Ctrl+D, Ctrl+U, page up, page down
 
 Also for toggling all of the toggles above through this mechanism, too!
 
+### --nerd-icons
+
+Enable the display of file names with a nerd icon prefix.
+
+### --color-scheme
+
 ### IOTACTL_FLAGS
 
 Would also be great if we could specify default flags in the environment.
