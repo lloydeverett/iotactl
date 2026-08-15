@@ -8,14 +8,17 @@ use crate::entry::Entry;
 const COLUMN_WIDTH: u16 = 32;
 /// Minimum width reserved for the trailing preview column.
 const PREVIEW_MIN_WIDTH: u16 = 24;
+/// Gap between adjacent columns (and between the last column and the
+/// preview column).
+const COLUMN_SPACING: u16 = 1;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Min(3),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(f.area());
 
@@ -31,7 +34,11 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     )]);
-    f.render_widget(Paragraph::new(path), area);
+    let block = Block::default()
+        .borders(Borders::BOTTOM)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let para = Paragraph::new(path).block(block);
+    f.render_widget(para, area);
 }
 
 /// Renders the Miller-columns stack of opened directories, followed by a
@@ -43,7 +50,8 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
 
     let preview_width = PREVIEW_MIN_WIDTH.min(area.width);
     let available_for_columns = area.width.saturating_sub(preview_width);
-    let max_visible = ((available_for_columns / COLUMN_WIDTH).max(1) as usize).min(total);
+    let column_stride = COLUMN_WIDTH + COLUMN_SPACING;
+    let max_visible = ((available_for_columns / column_stride).max(1) as usize).min(total);
     let visible = max_visible;
     let start_idx = total - visible;
 
@@ -52,6 +60,7 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(constraints)
+        .spacing(COLUMN_SPACING)
         .split(area);
 
     for offset in 0..visible {
@@ -62,9 +71,6 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
         let items: Vec<ListItem> = column.entries.iter().map(entry_item).collect();
         let selected = column.selected;
 
-        let block = Block::default()
-            .borders(Borders::RIGHT)
-            .border_style(Style::default().fg(Color::DarkGray));
         let highlight = if is_focused {
             Style::default()
                 .bg(Color::Rgb(45, 65, 90))
@@ -76,7 +82,7 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
                 .fg(Color::Rgb(210, 212, 216))
                 .add_modifier(Modifier::BOLD)
         };
-        let list = List::new(items).block(block).highlight_style(highlight);
+        let list = List::new(items).highlight_style(highlight);
 
         if is_focused {
             app.list_state.select(selected);
@@ -117,7 +123,11 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             ),
         ])
     };
-    f.render_widget(Paragraph::new(text), area);
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let para = Paragraph::new(text).block(block);
+    f.render_widget(para, area);
 }
 
 fn entry_item(entry: &Entry) -> ListItem<'static> {
