@@ -3,6 +3,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use async_trait::async_trait;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use syntect::easy::HighlightLines;
@@ -47,6 +48,7 @@ pub fn human_size(bytes: u64) -> String {
 /// directory. Node ids are segments relative to that root, so the root
 /// itself is addressed as `id == []` and callers can never resolve a path
 /// outside it: access is scoped to wherever the source was constructed.
+#[derive(Clone)]
 pub struct FsSource {
     root: PathBuf,
 }
@@ -76,10 +78,8 @@ impl FsSource {
         }
         Ok(path)
     }
-}
 
-impl NodeSource for FsSource {
-    fn read_dir(&self, id: &[String], show_hidden: bool) -> io::Result<Vec<Entry>> {
+    fn read_dir_sync(&self, id: &[String], show_hidden: bool) -> io::Result<Vec<Entry>> {
         let path = self.path_from_segments(id)?;
         let mut entries = Vec::new();
 
@@ -121,19 +121,40 @@ impl NodeSource for FsSource {
         Ok(entries)
     }
 
-    fn preview_tui(&self, id: &[String], show_hidden: bool) -> Text<'static> {
+    fn preview_tui_sync(&self, id: &[String], show_hidden: bool) -> Text<'static> {
         let path = match self.path_from_segments(id) {
             Ok(path) => path,
             Err(e) => return error_text(e.to_string()),
         };
         match fs::metadata(&path) {
-            Ok(meta) if meta.is_dir() => match self.read_dir(id, show_hidden) {
+            Ok(meta) if meta.is_dir() => match self.read_dir_sync(id, show_hidden) {
                 Ok(entries) => preview_dir(&entries),
                 Err(e) => error_text(e.to_string()),
             },
             Ok(_) => preview_file(&path),
             Err(e) => error_text(e.to_string()),
         }
+    }
+}
+
+#[async_trait]
+impl NodeSource for FsSource {
+    async fn read_dir(&self, id: &[String], show_hidden: bool) -> io::Result<Vec<Entry>> {
+        let source = self.clone();
+        let id = id.to_vec();
+        tokio::task::spawn_blocking(move || source.read_dir_sync(&id, show_hidden))
+            .await
+            .unwrap_or_else(|_| {
+                Err(io::Error::other("panicked while reading directory"))
+            })
+    }
+
+    async fn preview_tui(&self, id: &[String], show_hidden: bool) -> Text<'static> {
+        let source = self.clone();
+        let id = id.to_vec();
+        tokio::task::spawn_blocking(move || source.preview_tui_sync(&id, show_hidden))
+            .await
+            .unwrap_or_else(|_| error_text("panicked while loading preview".to_string()))
     }
 }
 

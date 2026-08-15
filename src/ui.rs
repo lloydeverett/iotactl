@@ -101,6 +101,18 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
         let is_focused = col_idx == total - 1 && !app.preview_focused;
         let column = &app.columns[col_idx];
 
+        let block = titled_box(app.path_label(&column.id), is_focused);
+
+        if column.loading {
+            let para = Paragraph::new(Span::styled(
+                "loading…",
+                Style::default().fg(Color::DarkGray),
+            ))
+            .block(block);
+            f.render_widget(para, chunks[offset]);
+            continue;
+        }
+
         let items: Vec<ListItem> = column.entries.iter().map(entry_item).collect();
         let selected = column.selected;
 
@@ -115,7 +127,6 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
                 .fg(Color::Rgb(210, 212, 216))
                 .add_modifier(Modifier::BOLD)
         };
-        let block = titled_box(app.path_label(&column.id), is_focused);
         let list = List::new(items).block(block).highlight_style(highlight);
 
         if is_focused {
@@ -139,6 +150,15 @@ fn draw_preview_column(f: &mut Frame, area: Rect, app: &mut App) {
     app.preview_viewport_height = area.height.saturating_sub(2);
     app.preview_viewport_width = area.width.saturating_sub(2);
     let block = titled_box(title, app.preview_focused);
+    if app.preview_loading {
+        let para = Paragraph::new(Span::styled(
+            "loading…",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .block(block);
+        f.render_widget(para, area);
+        return;
+    }
     let mut para = Paragraph::new(app.preview.clone())
         .block(block)
         .scroll((app.preview_scroll, 0));

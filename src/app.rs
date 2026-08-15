@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::io;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ratatui::text::Text;
 use ratatui::widgets::{ListState, Paragraph, Wrap};
+use tokio::sync::mpsc;
 
 use crate::entry::Entry;
 use crate::node_source::NodeSource;
@@ -12,10 +15,39 @@ pub struct Column {
     pub id: Vec<String>,
     pub entries: Vec<Entry>,
     pub selected: Option<usize>,
+    /// True while this column's listing is still being fetched. Only ever
+    /// true for the deepest column, immediately after `enter()` pushes a
+    /// placeholder and before its `ColumnLoaded` result arrives.
+    pub loading: bool,
+}
+
+/// Results of background `NodeSource` calls dispatched by `App`, delivered
+/// back to the main loop and applied via `App::apply_update`.
+pub enum AppUpdate {
+    PreviewLoaded {
+        epoch: u64,
+        text: Text<'static>,
+    },
+    ColumnLoaded {
+        epoch: u64,
+        id: Vec<String>,
+        result: io::Result<Vec<Entry>>,
+    },
+    ColumnsReloaded {
+        epoch: u64,
+        results: Vec<(Vec<String>, io::Result<Vec<Entry>>)>,
+    },
 }
 
 pub struct App {
-    source: Box<dyn NodeSource>,
+    source: Arc<dyn NodeSource>,
+    update_tx: mpsc::UnboundedSender<AppUpdate>,
+
+    /// Bumped before every dispatched background call. Results are tagged
+    /// with the epoch captured at dispatch time; `apply_update` discards any
+    /// result whose epoch no longer matches, since a newer navigation action
+    /// has already made it stale.
+    epoch: u64,
 
     /// Display name for the root node (id == []), e.g. "iotactl", since it
     /// has no path segment of its own to name it. Used as that column's
@@ -35,6 +67,9 @@ pub struct App {
     pub list_state: ListState,
 
     pub preview: Text<'static>,
+    /// True while a preview fetch is in flight; the preview pane renders a
+    /// loading placeholder instead of `preview` while this is set.
+    pub preview_loading: bool,
     /// Whether keyboard focus is on the preview pane rather than the
     /// column stack. Only reachable for file entries; directories are
     /// opened as a new column instead.
@@ -60,15 +95,23 @@ pub struct App {
 const TOAST_DURATION: Duration = Duration::from_secs(2);
 
 impl App {
-    pub fn new(start: Vec<String>, root_label: String, source: Box<dyn NodeSource>) -> Self {
+    pub async fn new(
+        start: Vec<String>,
+        root_label: String,
+        source: Arc<dyn NodeSource>,
+        update_tx: mpsc::UnboundedSender<AppUpdate>,
+    ) -> Self {
         let mut app = App {
             source,
+            update_tx,
+            epoch: 0,
             root_label,
             show_hidden: false,
             wrap_preview: false,
             columns: Vec::new(),
             list_state: ListState::default(),
             preview: Text::default(),
+            preview_loading: false,
             preview_focused: false,
             preview_scroll: 0,
             preview_viewport_height: 0,
@@ -79,17 +122,30 @@ impl App {
             should_quit: false,
             pending_g: false,
         };
-        let (col, err) = app.load_column(start);
+
+        // Nothing else is running yet, so the initial load can be awaited
+        // directly instead of going through the dispatch/channel machinery.
+        let show_hidden = app.show_hidden;
+        let result = app.source.read_dir(&start, show_hidden).await;
+        let (col, err) = app.column_from_result(start, result);
         app.set_message(err);
         app.columns.push(col);
         app.sync_focused_list_state();
-        app.update_preview();
+        if let Some(entry) = app.selected_entry() {
+            app.preview = app.source.preview_tui(&entry.id, show_hidden).await;
+        }
         app
     }
 
-    fn load_column(&self, id: Vec<String>) -> (Column, Option<String>) {
+    /// Turns a `read_dir` result into a `Column` plus an optional error
+    /// toast message, applying the remembered cursor position.
+    fn column_from_result(
+        &self,
+        id: Vec<String>,
+        result: io::Result<Vec<Entry>>,
+    ) -> (Column, Option<String>) {
         let remembered = self.cursor_memory.get(&id).copied().unwrap_or(0);
-        match self.source.read_dir(&id, self.show_hidden) {
+        match result {
             Ok(entries) => {
                 let selected = if entries.is_empty() {
                     None
@@ -101,6 +157,7 @@ impl App {
                         id,
                         entries,
                         selected,
+                        loading: false,
                     },
                     None,
                 )
@@ -112,6 +169,7 @@ impl App {
                         id,
                         entries: Vec::new(),
                         selected: None,
+                        loading: false,
                     },
                     Some(msg),
                 )
@@ -171,12 +229,28 @@ impl App {
         }
     }
 
-    fn update_preview(&mut self) {
-        self.preview = match self.selected_entry() {
-            None => Text::default(),
-            Some(entry) => self.source.preview_tui(&entry.id, self.show_hidden),
-        };
+    /// Dispatches a background fetch of the preview for the currently
+    /// selected entry, showing a loading placeholder until it arrives. If
+    /// nothing is selected, clears the preview immediately with no fetch.
+    fn dispatch_preview_update(&mut self) {
         self.preview_scroll = 0;
+        let Some(id) = self.selected_entry().map(|entry| entry.id.clone()) else {
+            self.preview = Text::default();
+            self.preview_loading = false;
+            return;
+        };
+
+        self.epoch += 1;
+        let epoch = self.epoch;
+        let show_hidden = self.show_hidden;
+        let source = Arc::clone(&self.source);
+        let tx = self.update_tx.clone();
+        self.preview_loading = true;
+
+        tokio::spawn(async move {
+            let text = source.preview_tui(&id, show_hidden).await;
+            let _ = tx.send(AppUpdate::PreviewLoaded { epoch, text });
+        });
     }
 
     fn preview_max_scroll(&self) -> u16 {
@@ -233,7 +307,7 @@ impl App {
         col.selected = Some(next);
         self.cursor_memory.insert(id, next);
         self.sync_focused_list_state();
-        self.update_preview();
+        self.dispatch_preview_update();
     }
 
     pub fn select_first(&mut self) {
@@ -245,7 +319,7 @@ impl App {
         col.selected = Some(0);
         self.cursor_memory.insert(id, 0);
         self.sync_focused_list_state();
-        self.update_preview();
+        self.dispatch_preview_update();
     }
 
     pub fn select_last(&mut self) {
@@ -258,27 +332,41 @@ impl App {
         col.selected = Some(last);
         self.cursor_memory.insert(id, last);
         self.sync_focused_list_state();
-        self.update_preview();
+        self.dispatch_preview_update();
     }
 
-    /// Opens the selected directory as a new column to the right.
+    /// Opens the selected directory as a new column to the right. Pushes a
+    /// loading placeholder immediately and dispatches the real fetch in the
+    /// background; `apply_update` resolves it once the listing arrives.
     pub fn enter(&mut self) {
         let Some(entry) = self.selected_entry().cloned() else {
             return;
         };
-        if entry.is_dir {
-            let (col, err) = self.load_column(entry.id);
-            if err.is_none() && col.entries.is_empty() {
-                self.set_message(Some(format!("Directory is empty: /{}", col.id.join("/"))));
-                return;
-            }
-            self.columns.push(col);
-            self.set_message(err);
-            self.sync_focused_list_state();
-            self.update_preview();
-        } else {
+        if !entry.is_dir {
             self.focus_preview();
+            return;
         }
+
+        self.columns.push(Column {
+            id: entry.id.clone(),
+            entries: Vec::new(),
+            selected: None,
+            loading: true,
+        });
+        self.preview_focused = false;
+        self.sync_focused_list_state();
+
+        self.epoch += 1;
+        let epoch = self.epoch;
+        let id = entry.id;
+        let show_hidden = self.show_hidden;
+        let source = Arc::clone(&self.source);
+        let tx = self.update_tx.clone();
+
+        tokio::spawn(async move {
+            let result = source.read_dir(&id, show_hidden).await;
+            let _ = tx.send(AppUpdate::ColumnLoaded { epoch, id, result });
+        });
     }
 
     /// Closes the deepest open column. The start directory is a hard
@@ -291,7 +379,7 @@ impl App {
         self.preview_focused = false;
         self.set_message(None);
         self.sync_focused_list_state();
-        self.update_preview();
+        self.dispatch_preview_update();
     }
 
     pub fn toggle_wrap(&mut self) {
@@ -299,22 +387,94 @@ impl App {
         self.preview_scroll = self.preview_scroll.min(self.preview_max_scroll());
     }
 
+    /// Reloads every currently-open column with the new `show_hidden`
+    /// setting, applying the whole stack atomically once every column's
+    /// listing has arrived (so the UI never shows a half-reloaded stack).
     pub fn toggle_hidden(&mut self) {
         self.preview_focused = false;
         self.show_hidden = !self.show_hidden;
+
+        self.epoch += 1;
+        let epoch = self.epoch;
         let ids: Vec<Vec<String>> = self.columns.iter().map(|c| c.id.clone()).collect();
-        let mut new_columns = Vec::with_capacity(ids.len());
-        let mut last_err = None;
-        for id in ids {
-            let (col, err) = self.load_column(id);
-            if err.is_some() {
-                last_err = err;
+        let show_hidden = self.show_hidden;
+        let source = Arc::clone(&self.source);
+        let tx = self.update_tx.clone();
+
+        tokio::spawn(async move {
+            let mut results = Vec::with_capacity(ids.len());
+            for id in ids {
+                let result = source.read_dir(&id, show_hidden).await;
+                results.push((id, result));
             }
-            new_columns.push(col);
+            let _ = tx.send(AppUpdate::ColumnsReloaded { epoch, results });
+        });
+    }
+
+    /// Applies a background fetch result to app state. Results tagged with a
+    /// stale epoch (superseded by a newer navigation action) are discarded.
+    pub fn apply_update(&mut self, update: AppUpdate) {
+        match update {
+            AppUpdate::PreviewLoaded { epoch, text } => {
+                if epoch != self.epoch {
+                    return;
+                }
+                self.preview = text;
+                self.preview_loading = false;
+            }
+            AppUpdate::ColumnLoaded { epoch, id, result } => {
+                if epoch != self.epoch {
+                    return;
+                }
+                match result {
+                    Ok(entries) if entries.is_empty() => {
+                        self.columns.pop();
+                        self.preview_focused = false;
+                        self.sync_focused_list_state();
+                        self.set_message(Some(format!(
+                            "Directory is empty: /{}",
+                            id.join("/")
+                        )));
+                    }
+                    Ok(entries) => {
+                        let remembered = self.cursor_memory.get(&id).copied().unwrap_or(0);
+                        let selected = Some(remembered.min(entries.len() - 1));
+                        if let Some(col) = self.columns.last_mut() {
+                            col.entries = entries;
+                            col.selected = selected;
+                            col.loading = false;
+                        }
+                        self.sync_focused_list_state();
+                        self.dispatch_preview_update();
+                    }
+                    Err(e) => {
+                        if let Some(col) = self.columns.last_mut() {
+                            col.loading = false;
+                        }
+                        self.set_message(Some(format!("Error reading /{}: {e}", id.join("/"))));
+                        self.sync_focused_list_state();
+                        self.dispatch_preview_update();
+                    }
+                }
+            }
+            AppUpdate::ColumnsReloaded { epoch, results } => {
+                if epoch != self.epoch {
+                    return;
+                }
+                let mut new_columns = Vec::with_capacity(results.len());
+                let mut last_err = None;
+                for (id, result) in results {
+                    let (col, err) = self.column_from_result(id, result);
+                    if err.is_some() {
+                        last_err = err;
+                    }
+                    new_columns.push(col);
+                }
+                self.columns = new_columns;
+                self.set_message(last_err);
+                self.sync_focused_list_state();
+                self.dispatch_preview_update();
+            }
         }
-        self.columns = new_columns;
-        self.set_message(last_err);
-        self.sync_focused_list_state();
-        self.update_preview();
     }
 }
