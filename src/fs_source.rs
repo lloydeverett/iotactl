@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span, Text};
 
 use crate::entry::Entry;
 use crate::highlight;
 use crate::node_source::NodeSource;
+use crate::sanitize::SanitizedText;
 
 const PREVIEW_READ_LIMIT: usize = 64 * 1024;
 
@@ -107,7 +107,7 @@ impl FsSource {
         Ok(entries)
     }
 
-    fn preview_tui_sync(&self, id: &[String], show_hidden: bool) -> Text<'static> {
+    fn preview_tui_sync(&self, id: &[String], show_hidden: bool) -> SanitizedText {
         let path = match self.path_from_segments(id) {
             Ok(path) => path,
             Err(e) => return error_text(e.to_string()),
@@ -135,7 +135,7 @@ impl NodeSource for FsSource {
             })
     }
 
-    async fn preview_tui(&self, id: &[String], show_hidden: bool) -> Text<'static> {
+    async fn preview_tui(&self, id: &[String], show_hidden: bool) -> SanitizedText {
         let source = self.clone();
         let id = id.to_vec();
         tokio::task::spawn_blocking(move || source.preview_tui_sync(&id, show_hidden))
@@ -144,19 +144,23 @@ impl NodeSource for FsSource {
     }
 }
 
-fn error_text(msg: String) -> Text<'static> {
-    Text::styled(msg, Style::default().fg(Color::Red))
+fn error_text(msg: String) -> SanitizedText {
+    SanitizedText::from_text(&msg, Style::default().fg(Color::Red))
 }
 
-fn dim_text(msg: String) -> Text<'static> {
-    Text::styled(msg, Style::default().fg(Color::DarkGray))
+fn dim_text(msg: String) -> SanitizedText {
+    SanitizedText::from_text(&msg, Style::default().fg(Color::DarkGray))
 }
 
-fn preview_dir(entries: &[Entry]) -> Text<'static> {
+fn preview_dir(entries: &[Entry]) -> SanitizedText {
     if entries.is_empty() {
         return dim_text("empty directory".to_string());
     }
-    let lines: Vec<Line<'static>> = entries
+    // Each label is built via `SanitizedText::from_label`, so the collected
+    // lines are already free of raw control characters — entry names come
+    // straight from the filesystem and, unlike `/`, aren't restricted from
+    // containing them.
+    let lines = entries
         .iter()
         .map(|entry| {
             let (label, style) = if entry.is_dir {
@@ -174,13 +178,13 @@ fn preview_dir(entries: &[Entry]) -> Text<'static> {
             } else {
                 (entry.name.clone(), Style::default())
             };
-            Line::from(Span::styled(label, style))
+            SanitizedText::from_label(&label, style)
         })
         .collect();
-    Text::from(lines)
+    SanitizedText::assume_sanitized(lines)
 }
 
-fn preview_file(path: &Path) -> Text<'static> {
+fn preview_file(path: &Path) -> SanitizedText {
     let mut file = match fs::File::open(path) {
         Ok(f) => f,
         Err(e) => return error_text(e.to_string()),
@@ -196,16 +200,22 @@ fn preview_file(path: &Path) -> Text<'static> {
     buf.truncate(n);
 
     if buf.is_empty() {
-        return Text::default();
+        return SanitizedText::default();
     }
     if buf.contains(&0) {
         return dim_text(format!("binary file, {}", human_size(total_size)));
     }
     match String::from_utf8(buf) {
-        Ok(text) => match highlight::highlight(path, &text) {
-            Some(lines) => Text::from(lines),
-            None => Text::raw(text),
-        },
+        Ok(text) => {
+            let sanitized = SanitizedText::from_text(&text, Style::default());
+            match highlight::highlight(path, &sanitized.plain()) {
+                // Safe: the highlighter only re-slices and re-styles the
+                // already-sanitized plain text handed to it above, so it
+                // can't introduce a raw control character of its own.
+                Some(lines) => SanitizedText::assume_sanitized(lines),
+                None => sanitized,
+            }
+        }
         Err(_) => dim_text(format!("binary file, {}", human_size(total_size))),
     }
 }

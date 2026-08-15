@@ -3,6 +3,7 @@ mod entry;
 mod fs_source;
 mod highlight;
 mod node_source;
+mod sanitize;
 mod ui;
 
 use std::env;

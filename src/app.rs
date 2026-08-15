@@ -3,12 +3,12 @@ use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ratatui::text::Text;
 use ratatui::widgets::{ListState, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use crate::entry::Entry;
 use crate::node_source::NodeSource;
+use crate::sanitize::SanitizedText;
 
 /// A single opened directory in the Miller-columns stack.
 pub struct Column {
@@ -26,7 +26,7 @@ pub struct Column {
 pub enum AppUpdate {
     PreviewLoaded {
         epoch: u64,
-        text: Text<'static>,
+        text: SanitizedText,
     },
     ColumnLoaded {
         epoch: u64,
@@ -66,7 +66,7 @@ pub struct App {
     pub columns: Vec<Column>,
     pub list_state: ListState,
 
-    pub preview: Text<'static>,
+    pub preview: SanitizedText,
     /// True while a preview fetch is in flight. The preview pane keeps
     /// showing the previous `preview` until `PREVIEW_LOADING_DEBOUNCE` has
     /// elapsed (see `preview_shows_loading`), so a fast fetch never flashes
@@ -124,7 +124,7 @@ impl App {
             wrap_preview: false,
             columns: Vec::new(),
             list_state: ListState::default(),
-            preview: Text::default(),
+            preview: SanitizedText::default(),
             preview_loading: false,
             preview_loading_since: None,
             preview_focused: false,
@@ -261,7 +261,7 @@ impl App {
     fn dispatch_preview_update(&mut self) {
         self.preview_scroll = 0;
         let Some(id) = self.selected_entry().map(|entry| entry.id.clone()) else {
-            self.preview = Text::default();
+            self.preview = SanitizedText::default();
             self.preview_loading = false;
             self.preview_loading_since = None;
             return;
@@ -306,7 +306,7 @@ impl App {
             let para = Paragraph::new(self.preview.clone()).wrap(Wrap { trim: false });
             para.line_count(self.preview_viewport_width) as u16
         } else {
-            self.preview.lines.len() as u16
+            self.preview.line_count() as u16
         };
         total_lines.saturating_sub(self.preview_viewport_height)
     }
