@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -9,26 +9,6 @@ use crate::entry::Entry;
 use crate::node_source::NodeSource;
 
 const PREVIEW_READ_LIMIT: usize = 64 * 1024;
-
-/// Splits an absolute filesystem path into the `Vec<String>` segments used
-/// to address nodes generically (see `Entry::id`). Intended for turning a
-/// real starting directory (e.g. from argv) into an initial node id.
-pub fn segments_from_path(path: &Path) -> Vec<String> {
-    path.components()
-        .filter_map(|c| match c {
-            Component::Normal(s) => Some(s.to_string_lossy().to_string()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Resolves node id segments back to an absolute filesystem path, rooted
-/// at `/`. The inverse of `segments_from_path`.
-fn path_from_segments(id: &[String]) -> PathBuf {
-    let mut path = PathBuf::from("/");
-    path.extend(id);
-    path
-}
 
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
@@ -48,12 +28,44 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-/// A `NodeSource` backed by the local filesystem.
-pub struct FsSource;
+/// A `NodeSource` backed by the local filesystem, rooted at a fixed
+/// directory. Node ids are segments relative to that root, so the root
+/// itself is addressed as `id == []` and callers can never resolve a path
+/// outside it: access is scoped to wherever the source was constructed.
+pub struct FsSource {
+    root: PathBuf,
+}
+
+impl FsSource {
+    pub fn new(root: PathBuf) -> Self {
+        FsSource { root }
+    }
+
+    /// Resolves `id` to a real path under `root`, rejecting any segment
+    /// that could step outside it (`.`, `..`) or that smuggles a separator
+    /// (e.g. `"a/../b"` as a single segment).
+    fn path_from_segments(&self, id: &[String]) -> io::Result<PathBuf> {
+        let mut path = self.root.clone();
+        for segment in id {
+            if segment.is_empty()
+                || segment == "."
+                || segment == ".."
+                || segment.contains(std::path::is_separator)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid path segment: {segment:?}"),
+                ));
+            }
+            path.push(segment);
+        }
+        Ok(path)
+    }
+}
 
 impl NodeSource for FsSource {
     fn read_dir(&self, id: &[String], show_hidden: bool) -> io::Result<Vec<Entry>> {
-        let path = path_from_segments(id);
+        let path = self.path_from_segments(id)?;
         let mut entries = Vec::new();
 
         for res in fs::read_dir(&path)? {
@@ -95,7 +107,10 @@ impl NodeSource for FsSource {
     }
 
     fn preview_tui(&self, id: &[String], show_hidden: bool) -> Text<'static> {
-        let path = path_from_segments(id);
+        let path = match self.path_from_segments(id) {
+            Ok(path) => path,
+            Err(e) => return error_text(e.to_string()),
+        };
         match fs::metadata(&path) {
             Ok(meta) if meta.is_dir() => match self.read_dir(id, show_hidden) {
                 Ok(entries) => preview_dir(&entries),

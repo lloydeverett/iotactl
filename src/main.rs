@@ -26,10 +26,12 @@ fn main() -> io::Result<()> {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| env::current_dir().expect("failed to get current directory"))
         .canonicalize()?;
-    let start_id = fs_source::segments_from_path(&start_dir);
 
     let mut terminal = setup_terminal()?;
-    let result = run(&mut terminal, App::new(start_id, Box::new(FsSource)));
+    let result = run(
+        &mut terminal,
+        App::new(Vec::new(), Box::new(FsSource::new(start_dir))),
+    );
     restore_terminal(&mut terminal)?;
     result
 }
