@@ -78,8 +78,8 @@ impl NodeSource for FsSource {
             // DirEntry::metadata does not follow symlinks, so we can detect them
             // and then resolve the target separately to know if it's a directory.
             let link_metadata = dir_entry.metadata()?;
-            let is_symlink = link_metadata.file_type().is_symlink();
-            let is_dir = if is_symlink {
+            let is_link = link_metadata.file_type().is_symlink();
+            let is_dir = if is_link {
                 fs::metadata(dir_entry.path())
                     .map(|target_meta| target_meta.is_dir())
                     .unwrap_or(false)
@@ -93,7 +93,7 @@ impl NodeSource for FsSource {
                 name,
                 id: child_id,
                 is_dir,
-                is_symlink,
+                is_link,
             });
         }
 
@@ -144,7 +144,7 @@ fn preview_dir(entries: &[Entry]) -> Text<'static> {
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 )
-            } else if entry.is_symlink {
+            } else if entry.is_link {
                 (
                     format!("{}@", entry.name),
                     Style::default().fg(Color::Magenta),

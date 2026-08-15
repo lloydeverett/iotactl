@@ -138,7 +138,7 @@ fn entry_item(entry: &Entry) -> ListItem<'static> {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )
-    } else if entry.is_symlink {
+    } else if entry.is_link {
         (
             format!("{}@", entry.name),
             Style::default().fg(Color::Magenta),
