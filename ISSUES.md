@@ -16,7 +16,7 @@ Confirm we have protections not to preview really big files, even if they're ent
 I suspect the file identification logic is not smart enough to handle anything beyond basic identification based on file extension. We'd want support for identification also on the basis of:
 
  - Shebang lines
- - Special filenames like `Dockerfile` and such
+ - Special filenames like `Dockerfile`, `Cargo.lock` and such
 
 ## Look into how the color scheme renders in different terminals
 
