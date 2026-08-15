@@ -1,0 +1,171 @@
+use std::fs;
+use std::io::{self, Read};
+use std::path::{Component, Path, PathBuf};
+
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+
+use crate::entry::Entry;
+use crate::node_source::NodeSource;
+
+const PREVIEW_READ_LIMIT: usize = 64 * 1024;
+
+/// Splits an absolute filesystem path into the `Vec<String>` segments used
+/// to address nodes generically (see `Entry::id`). Intended for turning a
+/// real starting directory (e.g. from argv) into an initial node id.
+pub fn segments_from_path(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Resolves node id segments back to an absolute filesystem path, rooted
+/// at `/`. The inverse of `segments_from_path`.
+fn path_from_segments(id: &[String]) -> PathBuf {
+    let mut path = PathBuf::from("/");
+    path.extend(id);
+    path
+}
+
+pub fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
+    if bytes == 0 {
+        return "0B".to_string();
+    }
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes}{}", UNITS[unit])
+    } else {
+        format!("{size:.1}{}", UNITS[unit])
+    }
+}
+
+/// A `NodeSource` backed by the local filesystem.
+pub struct FsSource;
+
+impl NodeSource for FsSource {
+    fn read_dir(&self, id: &[String], show_hidden: bool) -> io::Result<Vec<Entry>> {
+        let path = path_from_segments(id);
+        let mut entries = Vec::new();
+
+        for res in fs::read_dir(&path)? {
+            let dir_entry = res?;
+            let name = dir_entry.file_name().to_string_lossy().to_string();
+            if !show_hidden && name.starts_with('.') {
+                continue;
+            }
+
+            // DirEntry::metadata does not follow symlinks, so we can detect them
+            // and then resolve the target separately to know if it's a directory.
+            let link_metadata = dir_entry.metadata()?;
+            let is_symlink = link_metadata.file_type().is_symlink();
+            let is_dir = if is_symlink {
+                fs::metadata(dir_entry.path())
+                    .map(|target_meta| target_meta.is_dir())
+                    .unwrap_or(false)
+            } else {
+                link_metadata.is_dir()
+            };
+
+            let mut child_id = id.to_vec();
+            child_id.push(name.clone());
+            entries.push(Entry {
+                name,
+                id: child_id,
+                is_dir,
+                is_symlink,
+            });
+        }
+
+        entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        });
+
+        Ok(entries)
+    }
+
+    fn preview_tui(&self, id: &[String], show_hidden: bool) -> Text<'static> {
+        let path = path_from_segments(id);
+        match fs::metadata(&path) {
+            Ok(meta) if meta.is_dir() => match self.read_dir(id, show_hidden) {
+                Ok(entries) => preview_dir(&entries),
+                Err(e) => error_text(e.to_string()),
+            },
+            Ok(_) => preview_file(&path),
+            Err(e) => error_text(e.to_string()),
+        }
+    }
+}
+
+fn error_text(msg: String) -> Text<'static> {
+    Text::styled(msg, Style::default().fg(Color::Red))
+}
+
+fn dim_text(msg: String) -> Text<'static> {
+    Text::styled(msg, Style::default().fg(Color::DarkGray))
+}
+
+fn preview_dir(entries: &[Entry]) -> Text<'static> {
+    if entries.is_empty() {
+        return dim_text("empty directory".to_string());
+    }
+    let lines: Vec<Line<'static>> = entries
+        .iter()
+        .map(|entry| {
+            let (label, style) = if entry.is_dir {
+                (
+                    format!("{}/", entry.name),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if entry.is_symlink {
+                (
+                    format!("{}@", entry.name),
+                    Style::default().fg(Color::Magenta),
+                )
+            } else {
+                (entry.name.clone(), Style::default())
+            };
+            Line::from(Span::styled(label, style))
+        })
+        .collect();
+    Text::from(lines)
+}
+
+fn preview_file(path: &Path) -> Text<'static> {
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => return error_text(e.to_string()),
+    };
+
+    let total_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+
+    let mut buf = vec![0u8; PREVIEW_READ_LIMIT];
+    let n = match file.read(&mut buf) {
+        Ok(n) => n,
+        Err(e) => return error_text(e.to_string()),
+    };
+    buf.truncate(n);
+
+    if buf.is_empty() {
+        return Text::default();
+    }
+    if buf.contains(&0) {
+        return dim_text(format!("binary file, {}", human_size(total_size)));
+    }
+    match String::from_utf8(buf) {
+        Ok(text) => Text::raw(text),
+        Err(_) => dim_text(format!("binary file, {}", human_size(total_size))),
+    }
+}
