@@ -3,6 +3,21 @@
 
 Known or potential issues to look into (actual bugs or usability concerns).
 
+## Avoid syntax highlighting for very large files
+
+We can perhaps impose a time limit on the execution of treesitter, and if it takes too long, cancel the task, emit a warning and display plain text.
+
+## Avoid rendering preview for very very large files
+
+Confirm we have protections not to preview really big files, even if they're entirely text.
+
+## File identification
+
+I suspect the file identification logic is not smart enough to handle anything beyond basic identification based on file extension. We'd want support for identification also on the basis of:
+
+ - Shebang lines
+ - Special filenames like `Dockerfile` and such
+
 ## Look into how the color scheme renders in different terminals
 
 Can we try to make it always be pretty by default, perhaps using true colour?
@@ -12,10 +27,6 @@ But make it allow for different terminal capabilities and allow for user customi
 ## Show minor visual feedback for toggles in the status bar
 
 Show whether wrapping or hidden files viewing is toggled on or off.
-
-## More vim-like pager motions in the preview
-
-Currently we just support g/GG/j/k. Support page navigation too.
 
 ## Test error handling behaviour when intermediate directories that are being viewed are removed or renamed
 
