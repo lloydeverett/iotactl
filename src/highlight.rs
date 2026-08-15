@@ -1,0 +1,751 @@
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::OnceLock;
+
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
+
+/// Standard tree-sitter highlight-query capture names we look for. Anything
+/// not in this list (including punctuation/operators, left deliberately
+/// unstyled to avoid visual noise) renders as plain text.
+///
+/// The `text.*` and trailing `punctuation.special`/`string.escape` names are
+/// specific to `tree-sitter-md`'s block-level highlights query; the rest are
+/// the standard programming-language capture names shared by the other
+/// grammars.
+const RECOGNIZED_NAMES: &[&str] = &[
+    "attribute",
+    "boolean",
+    "comment",
+    "constant",
+    "constant.builtin",
+    "constructor",
+    "escape",
+    "function",
+    "function.builtin",
+    "function.macro",
+    "keyword",
+    "label",
+    "module",
+    "number",
+    "property",
+    "string",
+    "string.special",
+    "string.special.key",
+    "tag",
+    "type",
+    "type.builtin",
+    "variable.builtin",
+    "variable.parameter",
+    "text.title",
+    "text.literal",
+    "text.uri",
+    "text.reference",
+    "text.emphasis",
+    "text.strong",
+    "punctuation.special",
+];
+
+fn style_for(name: &str) -> Option<Style> {
+    let color = match name {
+        "keyword" => Color::Magenta,
+        "string" | "string.special" | "escape" => Color::Green,
+        "comment" | "punctuation.special" => Color::DarkGray,
+        "number" | "boolean" | "attribute" => Color::Yellow,
+        "type" | "type.builtin" | "constructor" | "tag" => Color::Cyan,
+        "function" | "function.builtin" | "function.macro" | "module" => Color::Blue,
+        "constant" | "constant.builtin" | "label" => Color::LightRed,
+        "variable.builtin" | "variable.parameter" => Color::LightMagenta,
+        "property" | "string.special.key" => Color::White,
+        "text.title" => return Some(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        "text.literal" => Color::Green,
+        "text.uri" => Color::Blue,
+        "text.reference" => Color::Cyan,
+        "text.emphasis" => return Some(Style::default().add_modifier(Modifier::ITALIC)),
+        "text.strong" => return Some(Style::default().add_modifier(Modifier::BOLD)),
+        _ => return None,
+    };
+    Some(Style::default().fg(color))
+}
+
+/// `tree-sitter-md`'s bundled `INJECTION_QUERY_BLOCK` doesn't set
+/// `injection.include-children` on any of its patterns. Without that flag,
+/// `tree-sitter-highlight` excludes each captured node's own children from
+/// the injected byte range by default — and the block grammar's scanner
+/// gives leaf-looking nodes like `(inline)` and `(code_fence_content)`
+/// several *anonymous* children (delimiter-run/line tokens used internally
+/// for block-level disambiguation, invisible in `to_sexp()`/the named-node
+/// tree) that span almost their entire text. Left at the default, the
+/// range handed to the injected grammar gets fragmented into the small
+/// gaps between those tokens — for `markdown_inline` that skips over
+/// emphasis/strong markers entirely; for fenced code blocks it hands the
+/// injected grammar a mangled, discontiguous snippet (e.g. HTML's strict
+/// tag parser gets no matches at all, silently falling back to an
+/// unhighlighted block; more error-tolerant grammars like Python still
+/// partially misparse, e.g. `return` failing to highlight as a keyword).
+/// So every pattern below sets `injection.include-children`; otherwise
+/// identical to the upstream query.
+const MARKDOWN_BLOCK_INJECTIONS_QUERY: &str = r#"
+((fenced_code_block
+  (info_string
+    (language) @injection.language)
+  (code_fence_content) @injection.content)
+ (#set! injection.include-children))
+
+((html_block) @injection.content
+  (#set! injection.language "html")
+  (#set! injection.include-children))
+
+(document
+  .
+  (section
+    .
+    (thematic_break)
+    (_) @injection.content
+    (thematic_break))
+  (#set! injection.language "yaml")
+  (#set! injection.include-children))
+
+((minus_metadata) @injection.content
+  (#set! injection.language "yaml")
+  (#set! injection.include-children))
+
+((plus_metadata) @injection.content
+  (#set! injection.language "toml")
+  (#set! injection.include-children))
+
+([
+  (inline)
+  (pipe_table_cell)
+] @injection.content
+ (#set! injection.language "markdown_inline")
+ (#set! injection.include-children))
+"#;
+
+/// Same as upstream `tree_sitter_md::HIGHLIGHT_QUERY_BLOCK`, except
+/// `(fenced_code_block)` (the container spanning the delimiters *and* the
+/// content) is dropped from the `@text.literal` capture, replaced by
+/// `(fenced_code_block_delimiter)` and `(info_string)` specifically — i.e.
+/// just the ` ```json ` / ` ``` ` lines, not `(code_fence_content)` itself
+/// (the now-pointless `(code_fence_content) @none` that used to cancel the
+/// inherited tint over the content is dropped too). Tried recognizing
+/// `@none` first — mapping it to `Style::default()` to explicitly cancel
+/// the green tint over the content — but `(code_fence_content)`'s span is
+/// *exactly* the injected python/html/etc. layer's content range, and that
+/// exact-boundary overlap between the outer "none" highlight and the
+/// injected layer corrupts tree-sitter-highlight's cross-layer event
+/// ordering: a keyword's own `HighlightEnd` (e.g. after `def`) got swapped
+/// with the far-later `@none` region's end, so the highlight span leaked
+/// across unrelated tokens several lines down. Simplest correct fix is to
+/// just never apply an outer tint to `(code_fence_content)` in the first
+/// place — its delimiter/info_string siblings don't overlap the injected
+/// range at all, so styling *them* is safe, and injected content renders
+/// with its own real styling (or plain, if the fence's language isn't
+/// recognized) with no ancestor style for anything to fight over.
+/// `(indented_code_block)` also keeps `@text.literal` outright: it has no
+/// language info, so it's never a target of an injection either.
+const MARKDOWN_BLOCK_HIGHLIGHTS_QUERY: &str = r#"
+(atx_heading
+  (inline) @text.title)
+
+(setext_heading
+  (paragraph) @text.title)
+
+[
+  (atx_h1_marker)
+  (atx_h2_marker)
+  (atx_h3_marker)
+  (atx_h4_marker)
+  (atx_h5_marker)
+  (atx_h6_marker)
+  (setext_h1_underline)
+  (setext_h2_underline)
+] @punctuation.special
+
+[
+  (link_title)
+  (indented_code_block)
+  (fenced_code_block_delimiter)
+  (info_string)
+] @text.literal
+
+(link_destination) @text.uri
+
+(link_label) @text.reference
+
+[
+  (list_marker_plus)
+  (list_marker_minus)
+  (list_marker_star)
+  (list_marker_dot)
+  (list_marker_parenthesis)
+  (thematic_break)
+] @punctuation.special
+
+[
+  (block_continuation)
+  (block_quote_marker)
+] @punctuation.special
+
+(backslash_escape) @string.escape
+"#;
+
+/// Same as upstream `tree_sitter_json::HIGHLIGHTS_QUERY`, with `(pair key:
+/// (_) @string.special.key)` moved *after* `(string) @string` instead of
+/// before it. tree-sitter-highlight resolves multiple patterns matching
+/// the same node by taking whichever pattern is declared *later* in the
+/// query text (that's the documented convention: put more-specific
+/// patterns after more-general ones). Upstream declares the specific key
+/// capture first and the generic string capture second, so the generic
+/// one silently wins and every JSON key renders with the same color as
+/// string values. Swapping the order lets the key capture win instead.
+const JSON_HIGHLIGHTS_QUERY: &str = r#"
+(string) @string
+
+(pair
+  key: (_) @string.special.key)
+
+(number) @number
+
+[
+  (null)
+  (true)
+  (false)
+] @constant.builtin
+
+(escape_sequence) @escape
+
+(comment) @comment
+"#;
+
+fn build_config(
+    lang: tree_sitter_language::LanguageFn,
+    name: &'static str,
+    highlights_query: &str,
+    injections_query: &str,
+) -> HighlightConfiguration {
+    let mut config = HighlightConfiguration::new(
+        lang.into(),
+        name,
+        highlights_query,
+        injections_query,
+        "",
+    )
+    .unwrap_or_else(|e| panic!("failed to build highlight query for {name}: {e}"));
+    config.configure(RECOGNIZED_NAMES);
+    config
+}
+
+fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
+    static REGISTRY: OnceLock<HashMap<&'static str, HighlightConfiguration>> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut m = HashMap::new();
+        m.insert(
+            "rust",
+            build_config(
+                tree_sitter_rust::LANGUAGE,
+                "rust",
+                tree_sitter_rust::HIGHLIGHTS_QUERY,
+                tree_sitter_rust::INJECTIONS_QUERY,
+            ),
+        );
+        m.insert(
+            "toml",
+            build_config(
+                tree_sitter_toml_ng::LANGUAGE,
+                "toml",
+                tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+                "",
+            ),
+        );
+        m.insert(
+            "python",
+            build_config(
+                tree_sitter_python::LANGUAGE,
+                "python",
+                tree_sitter_python::HIGHLIGHTS_QUERY,
+                "",
+            ),
+        );
+        m.insert(
+            "javascript",
+            build_config(
+                tree_sitter_javascript::LANGUAGE,
+                "javascript",
+                tree_sitter_javascript::HIGHLIGHT_QUERY,
+                tree_sitter_javascript::INJECTIONS_QUERY,
+            ),
+        );
+        m.insert(
+            "typescript",
+            build_config(
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+                "typescript",
+                tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                "",
+            ),
+        );
+        m.insert(
+            "tsx",
+            build_config(
+                tree_sitter_typescript::LANGUAGE_TSX,
+                "tsx",
+                tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                "",
+            ),
+        );
+        m.insert(
+            "json",
+            build_config(
+                tree_sitter_json::LANGUAGE,
+                "json",
+                JSON_HIGHLIGHTS_QUERY,
+                "",
+            ),
+        );
+        m.insert(
+            "yaml",
+            build_config(
+                tree_sitter_yaml::LANGUAGE,
+                "yaml",
+                tree_sitter_yaml::HIGHLIGHTS_QUERY,
+                "",
+            ),
+        );
+        m.insert(
+            "c",
+            build_config(
+                tree_sitter_c::LANGUAGE,
+                "c",
+                tree_sitter_c::HIGHLIGHT_QUERY,
+                "",
+            ),
+        );
+        m.insert(
+            "cpp",
+            build_config(
+                tree_sitter_cpp::LANGUAGE,
+                "cpp",
+                tree_sitter_cpp::HIGHLIGHT_QUERY,
+                "",
+            ),
+        );
+        m.insert(
+            "go",
+            build_config(
+                tree_sitter_go::LANGUAGE,
+                "go",
+                tree_sitter_go::HIGHLIGHTS_QUERY,
+                "",
+            ),
+        );
+        m.insert(
+            "html",
+            build_config(
+                tree_sitter_html::LANGUAGE,
+                "html",
+                tree_sitter_html::HIGHLIGHTS_QUERY,
+                tree_sitter_html::INJECTIONS_QUERY,
+            ),
+        );
+        m.insert(
+            "css",
+            build_config(
+                tree_sitter_css::LANGUAGE,
+                "css",
+                tree_sitter_css::HIGHLIGHTS_QUERY,
+                "",
+            ),
+        );
+        m.insert(
+            "bash",
+            build_config(
+                tree_sitter_bash::LANGUAGE,
+                "bash",
+                tree_sitter_bash::HIGHLIGHT_QUERY,
+                "",
+            ),
+        );
+        m.insert(
+            "java",
+            build_config(
+                tree_sitter_java::LANGUAGE,
+                "java",
+                tree_sitter_java::HIGHLIGHTS_QUERY,
+                "",
+            ),
+        );
+        m.insert(
+            "lua",
+            build_config(
+                tree_sitter_lua::LANGUAGE,
+                "lua",
+                tree_sitter_lua::HIGHLIGHTS_QUERY,
+                tree_sitter_lua::INJECTIONS_QUERY,
+            ),
+        );
+        m.insert(
+            "ruby",
+            build_config(
+                tree_sitter_ruby::LANGUAGE,
+                "ruby",
+                tree_sitter_ruby::HIGHLIGHTS_QUERY,
+                "",
+            ),
+        );
+        // `tree-sitter-md` splits markdown into a block grammar (headings,
+        // code fences, list markers, links) and a separate inline grammar
+        // (bold, italic, inline code spans). Our injections query (see
+        // `MARKDOWN_BLOCK_INJECTIONS_QUERY`) marks each `(inline)` node
+        // with `injection.language = "markdown_inline"`, so registering
+        // that name below and driving `highlight()` with a real
+        // `injection_callback` (rather than `|_| None`) is enough to make
+        // the standard tree-sitter-highlight injection mechanism delegate
+        // into it — no separate parse pass needed. The same mechanism also
+        // picks up fenced-code-block languages and HTML/YAML/TOML
+        // injections declared in that query.
+        m.insert(
+            "markdown",
+            build_config(
+                tree_sitter_md::LANGUAGE,
+                "markdown",
+                MARKDOWN_BLOCK_HIGHLIGHTS_QUERY,
+                MARKDOWN_BLOCK_INJECTIONS_QUERY,
+            ),
+        );
+        m.insert(
+            "markdown_inline",
+            build_config(
+                tree_sitter_md::INLINE_LANGUAGE,
+                "markdown_inline",
+                tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
+                tree_sitter_md::INJECTION_QUERY_INLINE,
+            ),
+        );
+        m
+    })
+}
+
+fn language_for_extension(ext: &str) -> Option<&'static str> {
+    Some(match ext {
+        "rs" => "rust",
+        "toml" => "toml",
+        "py" | "pyw" => "python",
+        "js" | "mjs" | "cjs" | "jsx" => "javascript",
+        "ts" | "mts" | "cts" => "typescript",
+        "tsx" => "tsx",
+        "json" => "json",
+        "yaml" | "yml" => "yaml",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => "cpp",
+        "go" => "go",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "sh" | "bash" | "zsh" | "ksh" => "bash",
+        "java" => "java",
+        "lua" => "lua",
+        "rb" => "ruby",
+        "md" | "markdown" => "markdown",
+        _ => return None,
+    })
+}
+
+/// Syntax-highlights `text` based on the language inferred from `path`'s
+/// extension. Returns `None` when the extension isn't recognized, so the
+/// caller can fall back to rendering plain text.
+pub fn highlight(path: &Path, text: &str) -> Option<Vec<Line<'static>>> {
+    let lang_name = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(language_for_extension)?;
+    let config = registry().get(lang_name).expect("registered above");
+
+    let mut highlighter = Highlighter::new();
+    let events = highlighter
+        .highlight(config, text.as_bytes(), None, |lang_name| {
+            registry().get(lang_name)
+        })
+        .ok()?;
+
+    let mut lines: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut name_stack: Vec<&str> = Vec::new();
+
+    for event in events {
+        match event.ok()? {
+            HighlightEvent::HighlightStart(highlight) => {
+                name_stack.push(RECOGNIZED_NAMES[highlight.0]);
+            }
+            HighlightEvent::HighlightEnd => {
+                name_stack.pop();
+            }
+            HighlightEvent::Source { start, end } => {
+                let style = name_stack
+                    .last()
+                    .and_then(|name| style_for(name))
+                    .unwrap_or_default();
+
+                let region = &text[start..end];
+                let mut region_lines = region.split('\n');
+                if let Some(first) = region_lines.next() {
+                    if !first.is_empty() {
+                        lines
+                            .last_mut()
+                            .expect("lines is never empty")
+                            .push(Span::styled(first.to_string(), style));
+                    }
+                }
+                for line in region_lines {
+                    lines.push(Vec::new());
+                    if !line.is_empty() {
+                        lines
+                            .last_mut()
+                            .expect("just pushed")
+                            .push(Span::styled(line.to_string(), style));
+                    }
+                }
+            }
+        }
+    }
+
+    Some(lines.into_iter().map(Line::from).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Modifier;
+
+    #[test]
+    fn markdown_inline_emphasis_is_highlighted() {
+        let path = Path::new("sample.md");
+        let text = "This has *italic* and **bold** text.\n";
+        let lines = highlight(path, text).unwrap();
+        let spans = &lines[0].spans;
+        let styled_texts: Vec<(&str, Style)> =
+            spans.iter().map(|s| (s.content.as_ref(), s.style)).collect();
+
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "*italic*" && s.add_modifier.contains(Modifier::ITALIC)),
+            "expected an italic span for *italic*, got {styled_texts:?}"
+        );
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "**bold**" && s.add_modifier.contains(Modifier::BOLD)),
+            "expected a bold span for **bold**, got {styled_texts:?}"
+        );
+    }
+
+    #[test]
+    fn fenced_html_block_is_highlighted() {
+        let path = Path::new("sample.md");
+        let text = "```html\n<div class=\"foo\">bar</div>\n```\n";
+        let lines = highlight(path, text).unwrap();
+        let spans = &lines[1].spans;
+        let styled_texts: Vec<(&str, Style)> =
+            spans.iter().map(|s| (s.content.as_ref(), s.style)).collect();
+
+        assert!(
+            styled_texts
+                .iter()
+                .filter(|(t, s)| *t == "div" && s.fg == Some(Color::Cyan))
+                .count()
+                == 2,
+            "expected both `div` tag names highlighted as cyan, got {styled_texts:?}"
+        );
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "class" && s.fg == Some(Color::Yellow)),
+            "expected `class` attribute highlighted as yellow, got {styled_texts:?}"
+        );
+    }
+
+    #[test]
+    fn fenced_json_block_is_highlighted() {
+        let path = Path::new("sample.md");
+        let text = "```json\n{\"foo\": \"value\", \"bar\": 42, \"baz\": true}\n```\n";
+        let lines = highlight(path, text).unwrap();
+        let spans = &lines[1].spans;
+        let styled_texts: Vec<(&str, Style)> =
+            spans.iter().map(|s| (s.content.as_ref(), s.style)).collect();
+
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "42" && s.fg == Some(Color::Yellow)),
+            "expected `42` highlighted as a number, got {styled_texts:?}"
+        );
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "true" && s.fg == Some(Color::LightRed)),
+            "expected `true` highlighted as a builtin constant, got {styled_texts:?}"
+        );
+        assert!(
+            styled_texts.iter().any(|(t, s)| *t == "{" && *s == Style::default()),
+            "expected unstyled `{{` punctuation (no green code-block wash), got {styled_texts:?}"
+        );
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "\"foo\"" && s.fg == Some(Color::White)),
+            "expected key `\"foo\"` highlighted distinctly (white), got {styled_texts:?}"
+        );
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "\"value\"" && s.fg == Some(Color::Green)),
+            "expected string value `\"value\"` highlighted as a string (green), got {styled_texts:?}"
+        );
+
+        let opening_fence: Vec<(&str, Style)> = lines[0]
+            .spans
+            .iter()
+            .map(|s| (s.content.as_ref(), s.style))
+            .collect();
+        assert!(
+            opening_fence
+                .iter()
+                .all(|(_, s)| s.fg == Some(Color::Green)),
+            "expected the whole opening fence line (```json) to be green, got {opening_fence:?}"
+        );
+        let closing_fence: Vec<(&str, Style)> = lines[2]
+            .spans
+            .iter()
+            .map(|s| (s.content.as_ref(), s.style))
+            .collect();
+        assert!(
+            closing_fence
+                .iter()
+                .all(|(_, s)| s.fg == Some(Color::Green)),
+            "expected the closing fence line (```) to be green, got {closing_fence:?}"
+        );
+    }
+
+    #[test]
+    fn fenced_python_keyword_does_not_leak_across_lines() {
+        // Regression test: the `def` keyword's highlight span used to leak
+        // all the way to the end of the fenced block (covering `():`, the
+        // indent, and the space after `return`) instead of ending right
+        // after `def`. See MARKDOWN_BLOCK_HIGHLIGHTS_QUERY's doc comment.
+        let path = Path::new("sample.md");
+        let text = "```python\ndef foo():\n    return 42\n```\n";
+        let lines = highlight(path, text).unwrap();
+        let spans = &lines[1].spans;
+        let styled_texts: Vec<(&str, Style)> =
+            spans.iter().map(|s| (s.content.as_ref(), s.style)).collect();
+
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "def" && s.fg == Some(Color::Magenta)),
+            "expected `def` highlighted as a keyword, got {styled_texts:?}"
+        );
+        assert!(
+            !styled_texts
+                .iter()
+                .any(|(t, s)| t.contains("():") && s.fg == Some(Color::Magenta)),
+            "keyword highlight leaked past `def` onto `():`, got {styled_texts:?}"
+        );
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "foo" && s.fg == Some(Color::Blue)),
+            "expected `foo` highlighted as a function name, got {styled_texts:?}"
+        );
+    }
+
+    #[test]
+    fn plain_rust_file_is_highlighted() {
+        // Every other test drives highlighting through markdown's fenced-code
+        // injection. This one exercises the plain, non-markdown path
+        // (opening a `.rs` file directly) so a break in the base per-language
+        // registry/query wiring can't hide behind markdown-only coverage.
+        let path = Path::new("sample.rs");
+        let text = "fn main() {\n    let x = 42;\n}\n";
+        let lines = highlight(path, text).unwrap();
+        let styled_texts: Vec<(&str, Style)> = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| (s.content.as_ref(), s.style))
+            .collect();
+
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "fn" && s.fg == Some(Color::Magenta)),
+            "expected `fn` highlighted as a keyword, got {styled_texts:?}"
+        );
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "main" && s.fg == Some(Color::Blue)),
+            "expected `main` highlighted as a function name, got {styled_texts:?}"
+        );
+        assert!(
+            // tree-sitter-rust captures integer literals as
+            // `@constant.builtin` rather than `@number`.
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "42" && s.fg == Some(Color::LightRed)),
+            "expected `42` highlighted as a builtin constant, got {styled_texts:?}"
+        );
+    }
+
+    #[test]
+    fn unrecognized_extension_returns_none() {
+        let path = Path::new("sample.this-extension-does-not-exist");
+        assert!(highlight(path, "hello\n").is_none());
+    }
+
+    #[test]
+    fn fenced_block_with_unknown_language_falls_back_to_plain_text() {
+        // The fence's `injection.language` capture is whatever text follows
+        // the opening ``` — for a language we don't have a grammar for, the
+        // injection callback returns None and the content must render as
+        // plain, unstyled text rather than panicking or losing content.
+        let path = Path::new("sample.md");
+        let text = "```not-a-real-language\nsome content here\n```\n";
+        let lines = highlight(path, text).unwrap();
+        let content_line: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(content_line, "some content here");
+        assert!(
+            lines[1].spans.iter().all(|s| s.style == Style::default()),
+            "expected unrecognized fenced language to render as fully plain text, got {:?}",
+            lines[1].spans
+        );
+    }
+
+    #[test]
+    fn yaml_frontmatter_is_highlighted() {
+        // Regression coverage for MARKDOWN_BLOCK_INJECTIONS_QUERY's
+        // `(minus_metadata) @injection.content` pattern, which was
+        // hand-written (to add `injection.include-children`) but never
+        // actually exercised by a test.
+        let path = Path::new("sample.md");
+        let text = "---\nkey: value\n---\n";
+        let lines = highlight(path, text).unwrap();
+        let styled_texts: Vec<(&str, Style)> = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| (s.content.as_ref(), s.style))
+            .collect();
+
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "key" && s.fg == Some(Color::White)),
+            "expected frontmatter key highlighted distinctly (white), got {styled_texts:?}"
+        );
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "value" && s.fg == Some(Color::Green)),
+            "expected frontmatter value highlighted as a string (green), got {styled_texts:?}"
+        );
+    }
+}

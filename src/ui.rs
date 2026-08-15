@@ -150,7 +150,7 @@ fn draw_preview_column(f: &mut Frame, area: Rect, app: &mut App) {
     app.preview_viewport_height = area.height.saturating_sub(2);
     app.preview_viewport_width = area.width.saturating_sub(2);
     let block = titled_box(title, app.preview_focused);
-    if app.preview_loading {
+    if app.preview_shows_loading() {
         let para = Paragraph::new(Span::styled(
             "loading…",
             Style::default().fg(Color::DarkGray),

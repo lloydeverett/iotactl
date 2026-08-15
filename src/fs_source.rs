@@ -1,30 +1,16 @@
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{Theme, ThemeSet};
-use syntect::parsing::SyntaxSet;
-use syntect::util::LinesWithEndings;
 
 use crate::entry::Entry;
+use crate::highlight;
 use crate::node_source::NodeSource;
 
 const PREVIEW_READ_LIMIT: usize = 64 * 1024;
-
-fn syntax_set() -> &'static SyntaxSet {
-    static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
-    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
-}
-
-fn preview_theme() -> &'static Theme {
-    static THEME: OnceLock<Theme> = OnceLock::new();
-    THEME.get_or_init(|| ThemeSet::load_defaults().themes["base16-ocean.dark"].clone())
-}
 
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
@@ -216,44 +202,10 @@ fn preview_file(path: &Path) -> Text<'static> {
         return dim_text(format!("binary file, {}", human_size(total_size)));
     }
     match String::from_utf8(buf) {
-        Ok(text) => highlight_text(path, text),
+        Ok(text) => match highlight::highlight(path, &text) {
+            Some(lines) => Text::from(lines),
+            None => Text::raw(text),
+        },
         Err(_) => dim_text(format!("binary file, {}", human_size(total_size))),
     }
-}
-
-/// Syntax-highlights `text` based on the syntax inferred from `path`'s
-/// extension (falling back to its first line, for e.g. shebangs). Falls
-/// back to plain text when no syntax matches or highlighting fails.
-fn highlight_text(path: &Path, text: String) -> Text<'static> {
-    let syntax_set = syntax_set();
-    let syntax = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .and_then(|ext| syntax_set.find_syntax_by_extension(ext))
-        .or_else(|| syntax_set.find_syntax_by_first_line(&text));
-
-    let Some(syntax) = syntax else {
-        return Text::raw(text);
-    };
-
-    let mut highlighter = HighlightLines::new(syntax, preview_theme());
-    let mut lines = Vec::with_capacity(text.lines().count());
-    for line in LinesWithEndings::from(&text) {
-        let ranges = match highlighter.highlight_line(line, syntax_set) {
-            Ok(ranges) => ranges,
-            Err(_) => return Text::raw(text),
-        };
-        let spans: Vec<Span<'static>> = ranges
-            .into_iter()
-            .map(|(style, content)| {
-                let fg = style.foreground;
-                Span::styled(
-                    content.trim_end_matches(['\n', '\r']).to_string(),
-                    Style::default().fg(Color::Rgb(fg.r, fg.g, fg.b)),
-                )
-            })
-            .collect();
-        lines.push(Line::from(spans));
-    }
-    Text::from(lines)
 }

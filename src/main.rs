@@ -1,6 +1,7 @@
 mod app;
 mod entry;
 mod fs_source;
+mod highlight;
 mod node_source;
 mod ui;
 
@@ -22,6 +23,7 @@ use app::{App, AppUpdate};
 use fs_source::FsSource;
 
 const PAGE_SIZE: i32 = 10;
+const HALF_PAGE_SIZE: i32 = PAGE_SIZE / 2;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -78,6 +80,14 @@ async fn run(
             }
         };
 
+        let preview_loading_ttl = app.preview_loading_ttl();
+        let preview_loading_wait = async move {
+            match preview_loading_ttl {
+                Some(remaining) => tokio::time::sleep(remaining).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+
         tokio::select! {
             maybe_event = events.next() => {
                 match maybe_event {
@@ -95,6 +105,10 @@ async fn run(
             _ = toast_wait => {
                 // Toast expired with no input; loop back around to clear it.
             }
+            _ = preview_loading_wait => {
+                // Debounce window elapsed with the fetch still in flight;
+                // loop back around to show the loading placeholder.
+            }
         }
 
         if app.should_quit {
@@ -111,6 +125,20 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.preview_focused {
+                app.preview_scroll_by(HALF_PAGE_SIZE)
+            } else {
+                app.move_selection(HALF_PAGE_SIZE)
+            }
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.preview_focused {
+                app.preview_scroll_by(-HALF_PAGE_SIZE)
+            } else {
+                app.move_selection(-HALF_PAGE_SIZE)
+            }
         }
         KeyCode::Char('j') | KeyCode::Down => {
             if app.preview_focused {

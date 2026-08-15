@@ -67,9 +67,14 @@ pub struct App {
     pub list_state: ListState,
 
     pub preview: Text<'static>,
-    /// True while a preview fetch is in flight; the preview pane renders a
-    /// loading placeholder instead of `preview` while this is set.
+    /// True while a preview fetch is in flight. The preview pane keeps
+    /// showing the previous `preview` until `PREVIEW_LOADING_DEBOUNCE` has
+    /// elapsed (see `preview_shows_loading`), so a fast fetch never flashes
+    /// the loading placeholder.
     pub preview_loading: bool,
+    /// When the in-flight preview fetch started, if any. Used to debounce
+    /// the loading placeholder.
+    preview_loading_since: Option<Instant>,
     /// Whether keyboard focus is on the preview pane rather than the
     /// column stack. Only reachable for file entries; directories are
     /// opened as a new column instead.
@@ -94,6 +99,11 @@ pub struct App {
 /// How long an error toast stays on screen before it's cleared.
 const TOAST_DURATION: Duration = Duration::from_secs(2);
 
+/// How long a preview fetch must stay in flight before the loading
+/// placeholder is shown. Keeps quick fetches (e.g. a fast tree-sitter
+/// parse) from flashing "loading…" between two renders of real content.
+const PREVIEW_LOADING_DEBOUNCE: Duration = Duration::from_millis(80);
+
 impl App {
     pub async fn new(
         start: Vec<String>,
@@ -112,6 +122,7 @@ impl App {
             list_state: ListState::default(),
             preview: Text::default(),
             preview_loading: false,
+            preview_loading_since: None,
             preview_focused: false,
             preview_scroll: 0,
             preview_viewport_height: 0,
@@ -237,6 +248,7 @@ impl App {
         let Some(id) = self.selected_entry().map(|entry| entry.id.clone()) else {
             self.preview = Text::default();
             self.preview_loading = false;
+            self.preview_loading_since = None;
             return;
         };
 
@@ -246,11 +258,32 @@ impl App {
         let source = Arc::clone(&self.source);
         let tx = self.update_tx.clone();
         self.preview_loading = true;
+        self.preview_loading_since = Some(Instant::now());
 
         tokio::spawn(async move {
             let text = source.preview_tui(&id, show_hidden).await;
             let _ = tx.send(AppUpdate::PreviewLoaded { epoch, text });
         });
+    }
+
+    /// Whether the preview pane should show the loading placeholder rather
+    /// than the previous `preview`. False for the first
+    /// `PREVIEW_LOADING_DEBOUNCE` after a fetch starts, so a fetch that
+    /// completes quickly never displaces the old preview at all.
+    pub fn preview_shows_loading(&self) -> bool {
+        match self.preview_loading_since {
+            Some(since) => since.elapsed() >= PREVIEW_LOADING_DEBOUNCE,
+            None => false,
+        }
+    }
+
+    /// Time remaining before the loading placeholder should appear, if a
+    /// preview fetch is in flight and still within the debounce window.
+    /// The caller can use this to wake up exactly when needed instead of
+    /// polling on a fixed interval.
+    pub fn preview_loading_ttl(&self) -> Option<Duration> {
+        let since = self.preview_loading_since?;
+        Some(PREVIEW_LOADING_DEBOUNCE.saturating_sub(since.elapsed()))
     }
 
     fn preview_max_scroll(&self) -> u16 {
@@ -304,6 +337,11 @@ impl App {
         let len = col.entries.len() as i32;
         let current = col.selected.unwrap_or(0) as i32;
         let next = (current + delta).clamp(0, len - 1) as usize;
+        if next as i32 == current {
+            // Already at the top/bottom of the column: nothing changed, so
+            // skip the preview refetch and redraw entirely.
+            return;
+        }
         col.selected = Some(next);
         self.cursor_memory.insert(id, next);
         self.sync_focused_list_state();
@@ -421,6 +459,7 @@ impl App {
                 }
                 self.preview = text;
                 self.preview_loading = false;
+                self.preview_loading_since = None;
             }
             AppUpdate::ColumnLoaded { epoch, id, result } => {
                 if epoch != self.epoch {
