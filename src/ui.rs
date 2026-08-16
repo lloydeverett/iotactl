@@ -249,6 +249,9 @@ fn gutter_line(line_no: Option<usize>, num_width: usize) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
 }
 
+/// Renders the main help line (or the toggles line, when that menu is
+/// open). Toggles already have their own listing in `draw_toggles_footer`,
+/// so don't add them here even if their key also has a non-toggle use.
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     if app.toggles_menu_open {
         draw_toggles_footer(f, area, app);
@@ -266,7 +269,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled(msg.clone(), Style::default().fg(Color::Red)))
     } else if app.preview_focused {
         Line::from(Span::styled(
-            "j/k scroll • gg/G top/bottom • z zoom • t toggles • h back • q quit",
+            "j/k scroll • gg/G top/bottom • t toggles • h back • q quit",
             Style::default().fg(Color::DarkGray),
         ))
     } else {

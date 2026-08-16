@@ -291,7 +291,27 @@ impl App {
     /// Dispatches a background fetch of the preview for the currently
     /// selected entry, showing a loading placeholder until it arrives. If
     /// nothing is selected, clears the preview immediately with no fetch.
+    ///
+    /// The old preview is held on screen for `PREVIEW_LOADING_DEBOUNCE`
+    /// before the loading placeholder replaces it, so a fast fetch never
+    /// flashes "loading…" between two renders of real content. That only
+    /// makes sense when the old and new previews are of the same kind of
+    /// thing — e.g. moving the cursor between files in one directory. Going
+    /// up a level (see `go_up`) changes context entirely, so the held-over
+    /// preview would itself be a wrong-content flash; callers there should
+    /// use `dispatch_preview_update_immediate` instead.
     fn dispatch_preview_update(&mut self) {
+        self.dispatch_preview_update_inner(true);
+    }
+
+    /// Like `dispatch_preview_update`, but skips the debounce so the loading
+    /// placeholder (or the new preview, if the fetch is fast) appears right
+    /// away instead of holding over the previous preview.
+    fn dispatch_preview_update_immediate(&mut self) {
+        self.dispatch_preview_update_inner(false);
+    }
+
+    fn dispatch_preview_update_inner(&mut self, debounce: bool) {
         self.preview_scroll = 0;
         let Some(id) = self.selected_entry().map(|entry| entry.id.clone()) else {
             self.preview = SanitizedText::default();
@@ -305,7 +325,11 @@ impl App {
         let source = Arc::clone(&self.source);
         let tx = self.update_tx.clone();
         self.preview_loading = true;
-        self.preview_loading_since = Some(Instant::now());
+        self.preview_loading_since = Some(if debounce {
+            Instant::now()
+        } else {
+            Instant::now() - PREVIEW_LOADING_DEBOUNCE
+        });
 
         tokio::spawn(async move {
             let text = source.preview_tui(&id).await;
@@ -466,7 +490,7 @@ impl App {
         self.preview_focused = false;
         self.set_message(None);
         self.sync_focused_list_state();
-        self.dispatch_preview_update();
+        self.dispatch_preview_update_immediate();
     }
 
     pub fn toggle_toggles_menu(&mut self) {
