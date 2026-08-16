@@ -110,7 +110,7 @@ fn file_icon(name: &str) -> (char, Color) {
     }
 }
 
-/// Picks the Nerd Font glyph/color for an entry, per `fs_source`'s policy:
+/// Picks the Nerd Font glyph/color for an entry, per `fs`'s policy:
 /// files are looked up by name via [`file_icon`], falling back to
 /// [`GENERIC_FILE_ICON`] for anything unrecognized. Folders always get
 /// [`FOLDER_ICON`] but deliberately with no color opinion (`None`): the UI
@@ -171,14 +171,20 @@ pub struct FsSource {
 }
 
 impl FsSource {
-    pub fn new(root: PathBuf, nerd_font: bool) -> Self {
-        FsSource {
+    /// Resolves `root` (e.g. a CLI-supplied path) to an absolute, symlink-free
+    /// directory the source will be scoped to. Errors carry `root` itself so
+    /// callers can report e.g. `"some/bad/path: No such file or directory"`
+    /// without needing to know this is backed by the filesystem.
+    pub fn new(root: &str, nerd_font: bool) -> io::Result<Self> {
+        let root =
+            fs::canonicalize(root).map_err(|e| io::Error::new(e.kind(), format!("{root}: {e}")))?;
+        Ok(FsSource {
             root,
             show_hidden: Arc::new(AtomicBool::new(false)),
             raw_markdown: Arc::new(AtomicBool::new(false)),
             show_meta: Arc::new(AtomicBool::new(false)),
             nerd_font,
-        }
+        })
     }
 
     /// Resolves `id` to a real path under `root`, rejecting any segment

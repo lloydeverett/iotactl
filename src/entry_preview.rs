@@ -1,7 +1,7 @@
 //! Shared formatting for turning a `NodeSource`'s [`Entry`] list into
 //! preview-ready text — what `NodeSource::preview_tui` shows when the
 //! previewed node is itself a directory (or an equivalent container).
-//! Deliberately independent of any particular source's internals (`fs_source`
+//! Deliberately independent of any particular source's internals (`fs`
 //! is just the first caller) so every implementation can reuse it instead of
 //! reinventing directory-listing formatting, and independent of the `ui`
 //! module too, since `ui::entry_item` renders the same per-entry styling
@@ -93,7 +93,7 @@ pub fn entry_line(entry: &Entry, nerd_font: bool) -> Line<'static> {
 /// Formats `entries` as a preview: one line per entry via `entry_line`, or
 /// a dim "empty directory" placeholder if there are none. Any `NodeSource`
 /// impl can call this from `preview_tui` when the previewed node is itself
-/// a directory — see `fs_source::FsSource::preview_tui_sync` for the
+/// a directory — see `fs::FsSource::preview_tui_sync` for the
 /// canonical example.
 pub fn format_dir_preview(entries: &[Entry], nerd_font: bool) -> SanitizedText {
     if entries.is_empty() {

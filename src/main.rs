@@ -3,7 +3,7 @@ mod cli_error;
 mod command;
 mod entry;
 mod entry_preview;
-mod fs_source;
+mod fs;
 mod highlight;
 mod node_source;
 mod sanitize;
@@ -12,7 +12,6 @@ mod ui;
 
 use std::env;
 use std::io::{self, Stdout};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser};
@@ -31,7 +30,7 @@ use tokio_stream::StreamExt;
 
 use app::{App, AppUpdate};
 use cli_error::die;
-use fs_source::FsSource;
+use fs::FsSource;
 
 const PAGE_SIZE: i32 = 10;
 const HALF_PAGE_SIZE: i32 = PAGE_SIZE / 2;
@@ -40,7 +39,7 @@ const HALF_PAGE_SIZE: i32 = PAGE_SIZE / 2;
 #[command(version, args_override_self = true)]
 struct Cli {
     /// Directory to start browsing from. Defaults to the current directory.
-    path: Option<PathBuf>,
+    path: Option<String>,
 
     /// Show Nerd Font icons to the left of filenames, in listings and
     /// window titles. Requires a terminal font patched with Nerd Fonts.
@@ -194,23 +193,14 @@ async fn main() {
 async fn run_iotactl() -> io::Result<()> {
     let (cli, toggle_overrides) = parse_cli();
 
-    let given_path = cli.path.clone();
-    let start_dir = match cli.path {
-        Some(p) => p,
-        None => env::current_dir()
-            .map_err(|e| io::Error::new(e.kind(), format!("failed to get current directory: {e}")))?,
-    };
-    let start_dir = start_dir.canonicalize().map_err(|e| {
-        let shown = given_path.unwrap_or_else(|| PathBuf::from("."));
-        io::Error::new(e.kind(), format!("{}: {e}", shown.display()))
-    })?;
+    let path_arg = cli.path.unwrap_or_else(|| ".".to_string());
 
     let nerd_font = cli.nerd_font && !cli.no_nerd_font;
     let mouse = cli.mouse && !cli.no_mouse;
 
     let (tx, rx) = mpsc::unbounded_channel::<AppUpdate>();
     let source: Arc<dyn node_source::NodeSource> =
-        Arc::new(FsSource::new(start_dir, nerd_font));
+        Arc::new(FsSource::new(&path_arg, nerd_font)?);
     let app = App::new(Vec::new(), source, tx, nerd_font, &toggle_overrides).await;
 
     let mut terminal = setup_terminal(mouse)?;

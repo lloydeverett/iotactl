@@ -34,7 +34,7 @@ fail() {
 
 # Builds a deterministic directory tree under a fresh temp dir and prints its
 # path (also stashed in $FIXTURE_DIR for cleanup). Layout, sorted the way
-# fs_source.rs sorts it (directories first, then files, case-insensitive):
+# src/fs/mod.rs sorts it (directories first, then files, case-insensitive):
 #
 #   bbb_dir/nested_file.txt
 #   empty_dir/                (empty -> triggers the "directory is empty" toast)

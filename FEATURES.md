@@ -67,3 +67,7 @@ And this can probably turn into a clipboard.
 
 Could even have a marks view in a dialog.
 
+## "Manual of iotactl" node source
+
+Create an easily accessible manual, should be easy to get to via --manual or something.
+
