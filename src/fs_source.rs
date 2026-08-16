@@ -13,7 +13,7 @@ use crate::command::Command;
 use crate::entry::Entry;
 use crate::entry_preview;
 use crate::highlight;
-use crate::node_source::NodeSource;
+use crate::node_source::{NodeSource, Preview};
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 
@@ -254,21 +254,27 @@ impl FsSource {
         Ok(entries)
     }
 
-    fn preview_tui_sync(&self, id: &[String]) -> SanitizedText {
+    fn preview_tui_sync(&self, id: &[String]) -> Preview {
         let path = match self.path_from_segments(id) {
             Ok(path) => path,
-            Err(e) => return error_text(e.to_string()),
+            Err(e) => return Preview::new(error_text(e.to_string())),
         };
         if self.show_meta.load(Ordering::SeqCst) {
-            return preview_meta(&path);
+            return Preview {
+                text: preview_meta(&path),
+                override_disable_line_numbers: true,
+            };
         }
         match fs::metadata(&path) {
             Ok(meta) if meta.is_dir() => match self.read_dir_sync(id) {
-                Ok(entries) => entry_preview::format_dir_preview(&entries, self.nerd_font),
-                Err(e) => error_text(e.to_string()),
+                Ok(entries) => Preview {
+                    text: entry_preview::format_dir_preview(&entries, self.nerd_font),
+                    override_disable_line_numbers: true,
+                },
+                Err(e) => Preview::new(error_text(e.to_string())),
             },
-            Ok(_) => preview_file(&path, !self.raw_markdown.load(Ordering::SeqCst)),
-            Err(e) => error_text(e.to_string()),
+            Ok(_) => Preview::new(preview_file(&path, !self.raw_markdown.load(Ordering::SeqCst))),
+            Err(e) => Preview::new(error_text(e.to_string())),
         }
     }
 }
@@ -302,12 +308,14 @@ impl NodeSource for FsSource {
         }
     }
 
-    async fn preview_tui(&self, id: &[String]) -> SanitizedText {
+    async fn preview_tui(&self, id: &[String]) -> Preview {
         let source = self.clone();
         let id = id.to_vec();
         tokio::task::spawn_blocking(move || source.preview_tui_sync(&id))
             .await
-            .unwrap_or_else(|_| error_text("panicked while loading preview".to_string()))
+            .unwrap_or_else(|_| {
+                Preview::new(error_text("panicked while loading preview".to_string()))
+            })
     }
 
     fn available_commands(&self) -> Arc<[Command]> {

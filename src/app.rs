@@ -29,6 +29,7 @@ pub enum AppUpdate {
     PreviewLoaded {
         epoch: u64,
         text: SanitizedText,
+        override_disable_line_numbers: bool,
     },
     ColumnLoaded {
         epoch: u64,
@@ -87,6 +88,12 @@ pub struct App {
     pub list_state: ListState,
 
     pub preview: SanitizedText,
+    /// Set from the most recently loaded preview's
+    /// `Preview::override_disable_line_numbers` — forces the gutter off
+    /// regardless of `show_line_numbers` when the current preview isn't
+    /// line-numbered content (a directory listing, a metadata dump). See
+    /// `preview_gutter_width`.
+    pub preview_override_disable_line_numbers: bool,
     /// True while a preview fetch is in flight. The preview pane keeps
     /// showing the previous `preview` until `PREVIEW_LOADING_DEBOUNCE` has
     /// elapsed (see `preview_shows_loading`), so a fast fetch never flashes
@@ -173,6 +180,7 @@ impl App {
             columns: Vec::new(),
             list_state: ListState::default(),
             preview: SanitizedText::default(),
+            preview_override_disable_line_numbers: false,
             preview_loading: false,
             preview_loading_since: None,
             preview_focused: false,
@@ -196,7 +204,9 @@ impl App {
         app.columns.push(col);
         app.sync_focused_list_state();
         if let Some(entry) = app.selected_entry() {
-            app.preview = app.source.preview_tui(&entry.id).await;
+            let preview = app.source.preview_tui(&entry.id).await;
+            app.preview = preview.text;
+            app.preview_override_disable_line_numbers = preview.override_disable_line_numbers;
         }
         app
     }
@@ -381,6 +391,7 @@ impl App {
         }
         let Some(id) = self.selected_entry().map(|entry| entry.id.clone()) else {
             self.preview = SanitizedText::default();
+            self.preview_override_disable_line_numbers = false;
             self.preview_loading = false;
             self.preview_loading_since = None;
             self.preview_scroll_restore_percent = None;
@@ -399,8 +410,12 @@ impl App {
         });
 
         tokio::spawn(async move {
-            let text = source.preview_tui(&id).await;
-            let _ = tx.send(AppUpdate::PreviewLoaded { epoch, text });
+            let preview = source.preview_tui(&id).await;
+            let _ = tx.send(AppUpdate::PreviewLoaded {
+                epoch,
+                text: preview.text,
+                override_disable_line_numbers: preview.override_disable_line_numbers,
+            });
         });
     }
 
@@ -609,12 +624,10 @@ impl App {
 
     /// Width of the preview pane's line-number gutter, including its
     /// trailing space separator; zero when the toggle is off, or when the
-    /// current preview is a directory listing rather than file content.
+    /// current preview's source has overridden line numbers off (e.g. a
+    /// directory listing or metadata dump rather than file content).
     pub fn preview_gutter_width(&self) -> u16 {
-        if !self.show_line_numbers {
-            return 0;
-        }
-        if matches!(self.selected_entry(), Some(entry) if entry.is_dir) {
+        if !self.show_line_numbers || self.preview_override_disable_line_numbers {
             return 0;
         }
         self.preview_line_number_width() as u16 + 1
@@ -659,11 +672,16 @@ impl App {
     /// stale epoch (superseded by a newer navigation action) are discarded.
     pub fn apply_update(&mut self, update: AppUpdate) {
         match update {
-            AppUpdate::PreviewLoaded { epoch, text } => {
+            AppUpdate::PreviewLoaded {
+                epoch,
+                text,
+                override_disable_line_numbers,
+            } => {
                 if epoch != self.epoch {
                     return;
                 }
                 self.preview = text;
+                self.preview_override_disable_line_numbers = override_disable_line_numbers;
                 self.preview_loading = false;
                 self.preview_loading_since = None;
                 if let Some(percent) = self.preview_scroll_restore_percent.take() {

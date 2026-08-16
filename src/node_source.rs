@@ -8,6 +8,27 @@ use crate::entry::Entry;
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 
+/// What [`NodeSource::preview_tui`] returns: the styled preview text, plus
+/// whatever the source knows about how it should be displayed that the UI
+/// couldn't infer on its own.
+pub struct Preview {
+    pub text: SanitizedText,
+    /// Forces the preview pane's line-number gutter off regardless of the
+    /// user's line-numbers toggle. Set this when line numbers wouldn't
+    /// correspond to anything meaningful in `text` — e.g. a directory
+    /// listing or a `key: value` metadata dump rather than file content.
+    pub override_disable_line_numbers: bool,
+}
+
+impl Preview {
+    pub fn new(text: SanitizedText) -> Self {
+        Preview {
+            text,
+            override_disable_line_numbers: false,
+        }
+    }
+}
+
 /// Abstracts access to a hierarchy of directories and files.
 ///
 /// Methods are async so implementations that need real I/O or heavy
@@ -28,11 +49,11 @@ pub trait NodeSource: Send + Sync {
     /// doesn't work for the root.
     async fn root_entry(&self) -> Entry;
 
-    /// Builds a styled, display-ready preview for the node at `id`. Returns
+    /// Builds a styled, display-ready preview for the node at `id`. Carries
     /// `SanitizedText` rather than a raw `Text` so every implementation is
     /// forced through the escaping in [`crate::sanitize`] — see that
     /// module's docs for why that matters.
-    async fn preview_tui(&self, id: &[String]) -> SanitizedText;
+    async fn preview_tui(&self, id: &[String]) -> Preview;
 
     /// The commands this source makes available, independent of any
     /// particular node. Not yet invoked anywhere.
