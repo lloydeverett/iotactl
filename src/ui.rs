@@ -313,7 +313,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled(msg.clone(), Style::default().fg(Color::Red)))
     } else if app.preview_focused {
         Line::from(Span::styled(
-            "j/k scroll • gg/G top/bottom • t toggles • h back • q quit",
+            "j/k scroll • h back • gg/G top/bottom • t toggles • q quit",
             Style::default().fg(Color::DarkGray),
         ))
     } else {
