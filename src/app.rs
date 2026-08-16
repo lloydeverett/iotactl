@@ -59,6 +59,8 @@ pub struct App {
     /// lines (e.g. logs, minified files) scroll horizontally-free rather
     /// than reflowing.
     pub wrap_preview: bool,
+    /// Whether the preview pane shows a line-number gutter.
+    pub show_line_numbers: bool,
 
     /// Stack of opened directories, from the fixed start dir (index 0) down
     /// to the currently focused directory (last). Entering a directory
@@ -98,6 +100,9 @@ pub struct App {
     message_expires_at: Option<Instant>,
     pub should_quit: bool,
     pub pending_g: bool,
+    /// Whether the toggles menu is open. While open, the status bar shows
+    /// each toggle's state and key instead of the usual help text.
+    pub toggles_menu_open: bool,
 }
 
 /// How long an error toast stays on screen before it's cleared.
@@ -122,6 +127,7 @@ impl App {
             root_label,
             show_hidden: false,
             wrap_preview: false,
+            show_line_numbers: false,
             columns: Vec::new(),
             list_state: ListState::default(),
             preview: SanitizedText::default(),
@@ -136,6 +142,7 @@ impl App {
             message_expires_at: None,
             should_quit: false,
             pending_g: false,
+            toggles_menu_open: false,
         };
 
         // Nothing else is running yet, so the initial load can be awaited
@@ -438,16 +445,43 @@ impl App {
         self.dispatch_preview_update();
     }
 
+    pub fn toggle_toggles_menu(&mut self) {
+        self.toggles_menu_open = !self.toggles_menu_open;
+    }
+
     pub fn toggle_wrap(&mut self) {
         self.wrap_preview = !self.wrap_preview;
         self.preview_scroll = self.preview_scroll.min(self.preview_max_scroll());
+    }
+
+    pub fn toggle_line_numbers(&mut self) {
+        self.show_line_numbers = !self.show_line_numbers;
+        self.preview_scroll = self.preview_scroll.min(self.preview_max_scroll());
+    }
+
+    /// Digit width used to format line numbers in the preview gutter: wide
+    /// enough for the highest line number, but never less than 3.
+    pub fn preview_line_number_width(&self) -> usize {
+        self.preview.line_count().max(1).to_string().len().max(3)
+    }
+
+    /// Width of the preview pane's line-number gutter, including its
+    /// trailing space separator; zero when the toggle is off, or when the
+    /// current preview is a directory listing rather than file content.
+    pub fn preview_gutter_width(&self) -> u16 {
+        if !self.show_line_numbers {
+            return 0;
+        }
+        if matches!(self.selected_entry(), Some(entry) if entry.is_dir) {
+            return 0;
+        }
+        self.preview_line_number_width() as u16 + 1
     }
 
     /// Reloads every currently-open column with the new `show_hidden`
     /// setting, applying the whole stack atomically once every column's
     /// listing has arrived (so the UI never shows a half-reloaded stack).
     pub fn toggle_hidden(&mut self) {
-        self.preview_focused = false;
         self.show_hidden = !self.show_hidden;
 
         self.epoch += 1;
@@ -515,6 +549,13 @@ impl App {
                 if epoch != self.epoch {
                     return;
                 }
+                // Remember the previously selected entry so that, if it's
+                // still there after the reload (e.g. toggling hidden files
+                // while the cursor sits on an always-visible entry), the
+                // preview is left completely untouched rather than
+                // flickering through an unfocus-and-refetch.
+                let previous_selection = self.selected_entry().map(|e| e.id.clone());
+
                 let mut new_columns = Vec::with_capacity(results.len());
                 let mut last_err = None;
                 for (id, result) in results {
@@ -527,7 +568,13 @@ impl App {
                 self.columns = new_columns;
                 self.set_message(last_err);
                 self.sync_focused_list_state();
-                self.dispatch_preview_update();
+
+                let same_selection =
+                    self.selected_entry().map(|e| &e.id) == previous_selection.as_ref();
+                if !same_selection {
+                    self.preview_focused = false;
+                    self.dispatch_preview_update();
+                }
             }
         }
     }

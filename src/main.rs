@@ -1,4 +1,5 @@
 mod app;
+mod command;
 mod entry;
 mod fs_source;
 mod highlight;
@@ -208,6 +209,8 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
         }
         KeyCode::Char('H') => app.toggle_hidden(),
         KeyCode::Char('w') => app.toggle_wrap(),
+        KeyCode::Char('n') => app.toggle_line_numbers(),
+        KeyCode::Char('t') => app.toggle_toggles_menu(),
         _ => {}
     }
 }

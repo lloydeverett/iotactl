@@ -1,10 +1,12 @@
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::command::Command;
 use crate::entry::Entry;
 use crate::highlight;
 use crate::node_source::NodeSource;
@@ -68,6 +70,10 @@ impl FsSource {
     fn read_dir_sync(&self, id: &[String], show_hidden: bool) -> io::Result<Vec<Entry>> {
         let path = self.path_from_segments(id)?;
         let mut entries = Vec::new();
+        // Shared by every entry from this listing rather than allocated per
+        // entry, since FsSource currently exposes the same (empty) set of
+        // commands on every node.
+        let commands: Arc<[Command]> = Arc::from(Vec::new());
 
         for res in fs::read_dir(&path)? {
             let dir_entry = res?;
@@ -95,6 +101,7 @@ impl FsSource {
                 id: child_id,
                 is_dir,
                 is_link,
+                commands: commands.clone(),
             });
         }
 

@@ -147,28 +147,105 @@ fn draw_preview_column(f: &mut Frame, area: Rect, app: &mut App) {
         Some(entry) => app.path_label(&entry.id),
         None => app.cwd(),
     };
-    app.preview_viewport_height = area.height.saturating_sub(2);
-    app.preview_viewport_width = area.width.saturating_sub(2);
     let block = titled_box(title, app.preview_focused);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    app.preview_viewport_height = inner.height;
+
     if app.preview_shows_loading() {
+        app.preview_viewport_width = inner.width;
         let para = Paragraph::new(Span::styled(
             "loading…",
             Style::default().fg(Color::DarkGray),
-        ))
-        .block(block);
-        f.render_widget(para, area);
+        ));
+        f.render_widget(para, inner);
         return;
     }
-    let mut para = Paragraph::new(app.preview.clone())
-        .block(block)
-        .scroll((app.preview_scroll, 0));
+
+    let gutter_width = app.preview_gutter_width().min(inner.width);
+    let text_width = inner.width - gutter_width;
+    app.preview_viewport_width = text_width;
+
+    let text_area = if gutter_width > 0 {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(gutter_width), Constraint::Min(0)])
+            .split(inner);
+        let gutter = Paragraph::new(Text::from(gutter_lines(app, chunks[0].height, text_width)));
+        f.render_widget(gutter, chunks[0]);
+        chunks[1]
+    } else {
+        inner
+    };
+
+    let mut para = Paragraph::new(app.preview.clone()).scroll((app.preview_scroll, 0));
     if app.wrap_preview {
         para = para.wrap(Wrap { trim: false });
     }
-    f.render_widget(para, area);
+    f.render_widget(para, text_area);
+}
+
+/// Builds the line-number gutter's content for the visible window of
+/// `height` rows starting at `app.preview_scroll`. Numbers always match the
+/// preview's real line numbers: with wrapping off this is a plain
+/// sequential range, and with wrapping on only the first wrapped row of
+/// each source line is numbered — continuation rows are left blank.
+fn gutter_lines(app: &App, height: u16, text_width: u16) -> Vec<Line<'static>> {
+    let scroll = app.preview_scroll as usize;
+    let height = height as usize;
+    let total_lines = app.preview.line_count();
+    let num_width = app.preview_line_number_width();
+
+    if !app.wrap_preview {
+        return (0..height)
+            .map(|row| {
+                let line_no = scroll + row + 1;
+                gutter_line((line_no <= total_lines).then_some(line_no), num_width)
+            })
+            .collect();
+    }
+
+    let text: Text = app.preview.clone().into();
+    let mut out = Vec::with_capacity(height);
+    let mut virtual_row = 0usize;
+    for (idx, line) in text.lines.iter().enumerate() {
+        if virtual_row >= scroll + height {
+            break;
+        }
+        let wrapped_rows = Paragraph::new(line.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(text_width)
+            .max(1);
+        for sub in 0..wrapped_rows {
+            if virtual_row >= scroll + height {
+                break;
+            }
+            if virtual_row >= scroll {
+                out.push(gutter_line((sub == 0).then_some(idx + 1), num_width));
+            }
+            virtual_row += 1;
+        }
+    }
+    while out.len() < height {
+        out.push(gutter_line(None, num_width));
+    }
+    out
+}
+
+fn gutter_line(line_no: Option<usize>, num_width: usize) -> Line<'static> {
+    let text = match line_no {
+        Some(n) => format!("{n:>num_width$} "),
+        None => " ".repeat(num_width + 1),
+    };
+    Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
+    if app.toggles_menu_open {
+        draw_toggles_footer(f, area, app);
+        return;
+    }
+
     let count = app
         .columns
         .last()
@@ -180,20 +257,50 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled(msg.clone(), Style::default().fg(Color::Red)))
     } else if app.preview_focused {
         Line::from(Span::styled(
-            "j/k scroll • gg/G top/bottom • w wrap • h back • q quit",
+            "j/k scroll • gg/G top/bottom • t toggles • h back • q quit",
             Style::default().fg(Color::DarkGray),
         ))
     } else {
         Line::from(vec![
             count_span,
             Span::styled(
-                "h/j/k/l move • gg/G top/bottom • H hidden • w wrap • q quit",
+                "h/j/k/l move • gg/G top/bottom • t toggles • q quit",
                 Style::default().fg(Color::DarkGray),
             ),
         ])
     };
     let para = Paragraph::new(text);
     f.render_widget(para, area);
+}
+
+fn draw_toggles_footer(f: &mut Frame, area: Rect, app: &App) {
+    let line = Line::from(vec![
+        Span::styled(
+            "Toggles ",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        toggle_span('H', "hidden", app.show_hidden),
+        Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+        toggle_span('w', "wrap", app.wrap_preview),
+        Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+        toggle_span('n', "numbers", app.show_line_numbers),
+        Span::styled(" • t to exit", Style::default().fg(Color::DarkGray)),
+    ]);
+    let para = Paragraph::new(line);
+    f.render_widget(para, area);
+}
+
+fn toggle_span(key: char, label: &str, on: bool) -> Span<'static> {
+    let style = if on {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Span::styled(format!("{key} {label}"), style)
 }
 
 fn entry_item(entry: &Entry) -> ListItem<'static> {
