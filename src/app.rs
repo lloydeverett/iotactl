@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use crate::entry::Entry;
 use crate::node_source::NodeSource;
 use crate::sanitize::SanitizedText;
+use crate::toggle::Toggle;
 
 /// A single opened directory in the Miller-columns stack.
 pub struct Column {
@@ -54,13 +55,24 @@ pub struct App {
     /// title.
     root_label: String,
 
-    pub show_hidden: bool,
+    /// Toggles supplied by the node source (e.g. "hidden" for a filesystem
+    /// source), paired with their current values. The source is the sole
+    /// owner of what each one means and does; this is just a cache of its
+    /// state, kept because rendering the footer is synchronous while
+    /// `NodeSource::get_toggle` is not. Combined with the ambient,
+    /// always-applicable toggles (`wrap_preview`, `show_line_numbers`) when
+    /// the footer is drawn.
+    pub source_toggles: Vec<(Toggle, bool)>,
     /// Whether preview text wraps at the pane width. Off by default so long
     /// lines (e.g. logs, minified files) scroll horizontally-free rather
     /// than reflowing.
     pub wrap_preview: bool,
     /// Whether the preview pane shows a line-number gutter.
     pub show_line_numbers: bool,
+    /// Whether the preview pane expands to fill the whole screen while it's
+    /// focused, hiding the column stack. Has no visible effect while the
+    /// column stack is focused instead — see `draw_columns`.
+    pub zoom_preview: bool,
 
     /// Stack of opened directories, from the fixed start dir (index 0) down
     /// to the currently focused directory (last). Entering a directory
@@ -105,6 +117,19 @@ pub struct App {
     pub toggles_menu_open: bool,
 }
 
+/// Fetches every toggle the source exposes along with its current value.
+/// `NodeSource::get_toggle` is async since a real implementation may need
+/// I/O, so this is only ever done up front and cached — see
+/// `App::source_toggles`.
+async fn load_source_toggles(source: &Arc<dyn NodeSource>) -> Vec<(Toggle, bool)> {
+    let mut toggles = Vec::new();
+    for toggle in source.available_toggles().iter() {
+        let value = source.get_toggle(toggle).await.unwrap_or(false);
+        toggles.push((toggle.clone(), value));
+    }
+    toggles
+}
+
 /// How long an error toast stays on screen before it's cleared.
 const TOAST_DURATION: Duration = Duration::from_secs(2);
 
@@ -120,14 +145,16 @@ impl App {
         source: Arc<dyn NodeSource>,
         update_tx: mpsc::UnboundedSender<AppUpdate>,
     ) -> Self {
+        let source_toggles = load_source_toggles(&source).await;
         let mut app = App {
             source,
             update_tx,
             epoch: 0,
             root_label,
-            show_hidden: false,
+            source_toggles,
             wrap_preview: false,
             show_line_numbers: false,
+            zoom_preview: false,
             columns: Vec::new(),
             list_state: ListState::default(),
             preview: SanitizedText::default(),
@@ -147,14 +174,13 @@ impl App {
 
         // Nothing else is running yet, so the initial load can be awaited
         // directly instead of going through the dispatch/channel machinery.
-        let show_hidden = app.show_hidden;
-        let result = app.source.read_dir(&start, show_hidden).await;
+        let result = app.source.read_dir(&start).await;
         let (col, err) = app.column_from_result(start, result);
         app.set_message(err);
         app.columns.push(col);
         app.sync_focused_list_state();
         if let Some(entry) = app.selected_entry() {
-            app.preview = app.source.preview_tui(&entry.id, show_hidden).await;
+            app.preview = app.source.preview_tui(&entry.id).await;
         }
         app
     }
@@ -276,14 +302,13 @@ impl App {
 
         self.epoch += 1;
         let epoch = self.epoch;
-        let show_hidden = self.show_hidden;
         let source = Arc::clone(&self.source);
         let tx = self.update_tx.clone();
         self.preview_loading = true;
         self.preview_loading_since = Some(Instant::now());
 
         tokio::spawn(async move {
-            let text = source.preview_tui(&id, show_hidden).await;
+            let text = source.preview_tui(&id).await;
             let _ = tx.send(AppUpdate::PreviewLoaded { epoch, text });
         });
     }
@@ -422,12 +447,11 @@ impl App {
         self.epoch += 1;
         let epoch = self.epoch;
         let id = entry.id;
-        let show_hidden = self.show_hidden;
         let source = Arc::clone(&self.source);
         let tx = self.update_tx.clone();
 
         tokio::spawn(async move {
-            let result = source.read_dir(&id, show_hidden).await;
+            let result = source.read_dir(&id).await;
             let _ = tx.send(AppUpdate::ColumnLoaded { epoch, id, result });
         });
     }
@@ -459,6 +483,11 @@ impl App {
         self.preview_scroll = self.preview_scroll.min(self.preview_max_scroll());
     }
 
+    pub fn toggle_zoom(&mut self) {
+        self.zoom_preview = !self.zoom_preview;
+        self.preview_scroll = self.preview_scroll.min(self.preview_max_scroll());
+    }
+
     /// Digit width used to format line numbers in the preview gutter: wide
     /// enough for the highest line number, but never less than 3.
     pub fn preview_line_number_width(&self) -> usize {
@@ -478,23 +507,35 @@ impl App {
         self.preview_line_number_width() as u16 + 1
     }
 
-    /// Reloads every currently-open column with the new `show_hidden`
-    /// setting, applying the whole stack atomically once every column's
-    /// listing has arrived (so the UI never shows a half-reloaded stack).
-    pub fn toggle_hidden(&mut self) {
-        self.show_hidden = !self.show_hidden;
+    /// Flips whichever source toggle is bound to `key` (a no-op if the
+    /// current source doesn't expose one bound to it) and reloads every
+    /// currently-open column, applying the whole stack atomically once
+    /// every column's listing has arrived (so the UI never shows a
+    /// half-reloaded stack). Any source toggle can in principle change what
+    /// `read_dir` returns — "hidden" is just the one source toggle that
+    /// exists today — so this reload dance is generic rather than specific
+    /// to it. Callers outside the source (main's key handling, the footer)
+    /// never need to know what the toggle is called or does: they learn of
+    /// its existence and its key purely by querying `source_toggles`.
+    pub fn toggle_source_toggle(&mut self, key: char) {
+        let Some(idx) = self.source_toggles.iter().position(|(t, _)| t.key == key) else {
+            return;
+        };
+        let value = !self.source_toggles[idx].1;
+        self.source_toggles[idx].1 = value;
+        let toggle = self.source_toggles[idx].0.clone();
 
         self.epoch += 1;
         let epoch = self.epoch;
         let ids: Vec<Vec<String>> = self.columns.iter().map(|c| c.id.clone()).collect();
-        let show_hidden = self.show_hidden;
         let source = Arc::clone(&self.source);
         let tx = self.update_tx.clone();
 
         tokio::spawn(async move {
+            let _ = source.set_toggle(&toggle, value).await;
             let mut results = Vec::with_capacity(ids.len());
             for id in ids {
-                let result = source.read_dir(&id, show_hidden).await;
+                let result = source.read_dir(&id).await;
                 results.push((id, result));
             }
             let _ = tx.send(AppUpdate::ColumnsReloaded { epoch, results });

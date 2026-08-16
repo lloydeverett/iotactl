@@ -5,6 +5,7 @@ mod fs_source;
 mod highlight;
 mod node_source;
 mod sanitize;
+mod toggle;
 mod ui;
 
 use std::env;
@@ -207,10 +208,15 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                 app.select_first()
             }
         }
-        KeyCode::Char('H') => app.toggle_hidden(),
         KeyCode::Char('w') => app.toggle_wrap(),
         KeyCode::Char('n') => app.toggle_line_numbers(),
+        KeyCode::Char('z') => app.toggle_zoom(),
         KeyCode::Char('t') => app.toggle_toggles_menu(),
+        // Any other character key may be bound to a toggle the node source
+        // exposes (e.g. "hidden" for a filesystem source) — main.rs has no
+        // knowledge of what those are or what they're called, only that
+        // `App` knows how to look one up by key.
+        KeyCode::Char(c) => app.toggle_source_toggle(c),
         _ => {}
     }
 }

@@ -55,6 +55,15 @@ fn titled_box(title: String, is_focused: bool) -> Block<'static> {
 /// oldest (leftmost) ones slide out of view so the focused column and
 /// preview stay visible.
 fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
+    // Zoomed preview replaces the whole column stack rather than just
+    // widening the preview pane's share of it, so it can go back to
+    // occupying the same footprint the moment focus leaves the preview
+    // (e.g. pressing `h`) without needing to unwind any layout state.
+    if app.preview_focused && app.zoom_preview {
+        draw_preview_column(f, area, app);
+        return;
+    }
+
     let total = app.columns.len();
 
     // The last column is always visible; it's the focused one unless focus
@@ -257,7 +266,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled(msg.clone(), Style::default().fg(Color::Red)))
     } else if app.preview_focused {
         Line::from(Span::styled(
-            "j/k scroll • gg/G top/bottom • t toggles • h back • q quit",
+            "j/k scroll • gg/G top/bottom • z zoom • t toggles • h back • q quit",
             Style::default().fg(Color::DarkGray),
         ))
     } else {
@@ -273,22 +282,30 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, area);
 }
 
+/// Renders the combined toggle list: whatever the node source exposes
+/// (e.g. "hidden" for a filesystem source) followed by the ambient toggles
+/// that apply regardless of source (wrap, line numbers).
 fn draw_toggles_footer(f: &mut Frame, area: Rect, app: &App) {
-    let line = Line::from(vec![
-        Span::styled(
-            "Toggles ",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        toggle_span('H', "hidden", app.show_hidden),
-        Span::styled(" • ", Style::default().fg(Color::DarkGray)),
-        toggle_span('w', "wrap", app.wrap_preview),
-        Span::styled(" • ", Style::default().fg(Color::DarkGray)),
-        toggle_span('n', "numbers", app.show_line_numbers),
-        Span::styled(" • t to exit", Style::default().fg(Color::DarkGray)),
-    ]);
-    let para = Paragraph::new(line);
+    let separator = || Span::styled(" • ", Style::default().fg(Color::DarkGray));
+
+    let mut spans = vec![Span::styled(
+        "Toggles ",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )];
+    for (toggle, on) in &app.source_toggles {
+        spans.push(toggle_span(toggle.key, &toggle.name, *on));
+        spans.push(separator());
+    }
+    spans.push(toggle_span('w', "wrap", app.wrap_preview));
+    spans.push(separator());
+    spans.push(toggle_span('n', "numbers", app.show_line_numbers));
+    spans.push(separator());
+    spans.push(toggle_span('z', "zoom", app.zoom_preview));
+    spans.push(Span::styled(" • t to exit", Style::default().fg(Color::DarkGray)));
+
+    let para = Paragraph::new(Line::from(spans));
     f.render_widget(para, area);
 }
 

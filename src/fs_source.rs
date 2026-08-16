@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,8 +12,16 @@ use crate::entry::Entry;
 use crate::highlight;
 use crate::node_source::NodeSource;
 use crate::sanitize::SanitizedText;
+use crate::toggle::Toggle;
 
 const PREVIEW_READ_LIMIT: usize = 64 * 1024;
+
+/// Name of the toggle, exposed via `available_toggles`, that controls
+/// whether dotfile entries are included in listings. Filesystems are the
+/// only kind of source where "hidden" is a meaningful concept at all, so
+/// it's owned entirely here rather than threaded through `NodeSource` as a
+/// parameter.
+const HIDDEN_TOGGLE_NAME: &str = "hidden";
 
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
@@ -39,11 +48,18 @@ pub fn human_size(bytes: u64) -> String {
 #[derive(Clone)]
 pub struct FsSource {
     root: PathBuf,
+    /// Shared (not per-clone) so every `FsSource` handle backed by the same
+    /// root sees the same toggle state, since `read_dir`/`preview_tui` clone
+    /// `self` into a blocking task on every call.
+    show_hidden: Arc<AtomicBool>,
 }
 
 impl FsSource {
     pub fn new(root: PathBuf) -> Self {
-        FsSource { root }
+        FsSource {
+            root,
+            show_hidden: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Resolves `id` to a real path under `root`, rejecting any segment
@@ -67,13 +83,14 @@ impl FsSource {
         Ok(path)
     }
 
-    fn read_dir_sync(&self, id: &[String], show_hidden: bool) -> io::Result<Vec<Entry>> {
+    fn read_dir_sync(&self, id: &[String]) -> io::Result<Vec<Entry>> {
         let path = self.path_from_segments(id)?;
+        let show_hidden = self.show_hidden.load(Ordering::SeqCst);
         let mut entries = Vec::new();
         // Shared by every entry from this listing rather than allocated per
         // entry, since FsSource currently exposes the same (empty) set of
         // commands on every node.
-        let commands: Arc<[Command]> = Arc::from(Vec::new());
+        let suggested_commands: Arc<[Command]> = Arc::from(Vec::new());
 
         for res in fs::read_dir(&path)? {
             let dir_entry = res?;
@@ -101,7 +118,7 @@ impl FsSource {
                 id: child_id,
                 is_dir,
                 is_link,
-                commands: commands.clone(),
+                suggested_commands: suggested_commands.clone(),
             });
         }
 
@@ -114,13 +131,13 @@ impl FsSource {
         Ok(entries)
     }
 
-    fn preview_tui_sync(&self, id: &[String], show_hidden: bool) -> SanitizedText {
+    fn preview_tui_sync(&self, id: &[String]) -> SanitizedText {
         let path = match self.path_from_segments(id) {
             Ok(path) => path,
             Err(e) => return error_text(e.to_string()),
         };
         match fs::metadata(&path) {
-            Ok(meta) if meta.is_dir() => match self.read_dir_sync(id, show_hidden) {
+            Ok(meta) if meta.is_dir() => match self.read_dir_sync(id) {
                 Ok(entries) => preview_dir(&entries),
                 Err(e) => error_text(e.to_string()),
             },
@@ -132,22 +149,63 @@ impl FsSource {
 
 #[async_trait]
 impl NodeSource for FsSource {
-    async fn read_dir(&self, id: &[String], show_hidden: bool) -> io::Result<Vec<Entry>> {
+    async fn read_dir(&self, id: &[String]) -> io::Result<Vec<Entry>> {
         let source = self.clone();
         let id = id.to_vec();
-        tokio::task::spawn_blocking(move || source.read_dir_sync(&id, show_hidden))
+        tokio::task::spawn_blocking(move || source.read_dir_sync(&id))
             .await
             .unwrap_or_else(|_| {
                 Err(io::Error::other("panicked while reading directory"))
             })
     }
 
-    async fn preview_tui(&self, id: &[String], show_hidden: bool) -> SanitizedText {
+    async fn preview_tui(&self, id: &[String]) -> SanitizedText {
         let source = self.clone();
         let id = id.to_vec();
-        tokio::task::spawn_blocking(move || source.preview_tui_sync(&id, show_hidden))
+        tokio::task::spawn_blocking(move || source.preview_tui_sync(&id))
             .await
             .unwrap_or_else(|_| error_text("panicked while loading preview".to_string()))
+    }
+
+    fn available_commands(&self) -> Arc<[Command]> {
+        Arc::from(Vec::new())
+    }
+
+    fn available_toggles(&self) -> Arc<[Toggle]> {
+        Arc::from(vec![Toggle {
+            name: HIDDEN_TOGGLE_NAME.to_string(),
+            key: 'H',
+        }])
+    }
+
+    async fn set_toggle(&self, toggle: &Toggle, value: bool) -> io::Result<()> {
+        if toggle.name == HIDDEN_TOGGLE_NAME {
+            self.show_hidden.store(value, Ordering::SeqCst);
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("FsSource has no toggle named {:?}", toggle.name),
+            ))
+        }
+    }
+
+    async fn get_toggle(&self, toggle: &Toggle) -> io::Result<bool> {
+        if toggle.name == HIDDEN_TOGGLE_NAME {
+            Ok(self.show_hidden.load(Ordering::SeqCst))
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("FsSource has no toggle named {:?}", toggle.name),
+            ))
+        }
+    }
+
+    async fn execute_command(&self, command: &Command, _args: &[String]) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("FsSource has no command named {:?}", command.name),
+        ))
     }
 }
 
