@@ -504,12 +504,10 @@ impl App {
                         self.dispatch_preview_update();
                     }
                     Err(e) => {
-                        if let Some(col) = self.columns.last_mut() {
-                            col.loading = false;
-                        }
-                        self.set_message(Some(format!("Error reading /{}: {e}", id.join("/"))));
+                        self.columns.pop();
+                        self.preview_focused = false;
                         self.sync_focused_list_state();
-                        self.dispatch_preview_update();
+                        self.set_message(Some(format!("Error reading /{}: {e}", id.join("/"))));
                     }
                 }
             }
