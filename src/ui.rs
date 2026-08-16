@@ -16,13 +16,17 @@ const PREVIEW_MIN_WIDTH: u16 = 24;
 const PREVIEW_FOCUSED_MIN_WIDTH: u16 = 80;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let width = f.area().width;
+    let footer = footer_text(app, width);
+    let footer_height = footer.lines.len().max(1) as u16;
+
     let root = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([Constraint::Min(3), Constraint::Length(footer_height)])
         .split(f.area());
 
     draw_columns(f, root[0], app);
-    draw_footer(f, root[1], app);
+    f.render_widget(Paragraph::new(footer), root[1]);
 }
 
 /// Border/title style for a box, depending on whether it holds the
@@ -293,13 +297,40 @@ fn gutter_line(line_no: Option<usize>, num_width: usize) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
 }
 
-/// Renders the main help line (or the toggles line, when that menu is
-/// open). Toggles already have their own listing in `draw_toggles_footer`,
-/// so don't add them here even if their key also has a non-toggle use.
-fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
+/// Width, in terminal columns, used to indent continuation lines when the
+/// footer wraps to more than one row.
+const FOOTER_WRAP_INDENT: &str = "        ";
+
+/// Builds the footer content (the main help line, or the toggles line when
+/// that menu is open), wrapped to fit `width` columns. Each hint/toggle is
+/// treated as a single indivisible "bullet" item: when a line runs out of
+/// room, wrapping happens on a bullet boundary rather than mid-item, and
+/// continuation lines are indented with `FOOTER_WRAP_INDENT`.
+fn footer_text(app: &App, width: u16) -> Text<'static> {
     if app.toggles_menu_open {
-        draw_toggles_footer(f, area, app);
-        return;
+        return wrap_items(toggles_footer_items(app), width, FOOTER_WRAP_INDENT, true);
+    }
+
+    if let Some(msg) = &app.message {
+        return Text::from(Line::from(Span::styled(
+            msg.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let gray = Style::default().fg(Color::DarkGray);
+    if app.preview_focused {
+        let items = vec![
+            vec![Span::styled("j/k scroll", gray)],
+            vec![Span::styled("h back", gray)],
+            vec![Span::styled("gg/G top/bottom", gray)],
+            vec![Span::styled("t toggles", gray)],
+            vec![Span::styled("q quit", gray)],
+        ];
+        // No indent here: unlike the column listing, there's nothing on the
+        // left of the preview for a wrapped line to visually align under.
+        // No header item either, so every gap is a real bullet.
+        return wrap_items(items, width, "", false);
     }
 
     let count = app
@@ -307,53 +338,99 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         .last()
         .map(|column| column.entries.len())
         .unwrap_or(0);
-    let count_span = Span::raw(format!("{count} items "));
-
-    let text = if let Some(msg) = &app.message {
-        Line::from(Span::styled(msg.clone(), Style::default().fg(Color::Red)))
-    } else if app.preview_focused {
-        Line::from(Span::styled(
-            "j/k scroll • h back • gg/G top/bottom • t toggles • q quit",
-            Style::default().fg(Color::DarkGray),
-        ))
-    } else {
-        Line::from(vec![
-            count_span,
-            Span::styled(
-                "h/j/k/l move • gg/G top/bottom • t toggles • q quit",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ])
-    };
-    let para = Paragraph::new(text);
-    f.render_widget(para, area);
+    let items = vec![
+        vec![Span::raw(format!("{count} items"))],
+        vec![Span::styled("h/j/k/l move", gray)],
+        vec![Span::styled("gg/G top/bottom", gray)],
+        vec![Span::styled("t toggles", gray)],
+        vec![Span::styled("q quit", gray)],
+    ];
+    wrap_items(items, width, FOOTER_WRAP_INDENT, true)
 }
 
-/// Renders the combined toggle list: whatever the node source exposes
-/// (e.g. "hidden" for a filesystem source) followed by the ambient toggles
-/// that apply regardless of source (wrap, line numbers).
-fn draw_toggles_footer(f: &mut Frame, area: Rect, app: &App) {
-    let separator = || Span::styled(" • ", Style::default().fg(Color::DarkGray));
-
-    let mut spans = vec![Span::styled(
-        "Toggles ",
+/// Builds the combined toggle list as bullet items: whatever the node
+/// source exposes (e.g. "hidden" for a filesystem source) followed by the
+/// ambient toggles that apply regardless of source (wrap, line numbers).
+fn toggles_footer_items(app: &App) -> Vec<Vec<Span<'static>>> {
+    let gray = Style::default().fg(Color::DarkGray);
+    let mut items = vec![vec![Span::styled(
+        "Toggles",
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
-    )];
+    )]];
     for (toggle, on) in &app.source_toggles {
-        spans.push(toggle_span(toggle.key, &toggle.name, *on));
-        spans.push(separator());
+        items.push(vec![toggle_span(toggle.key, &toggle.name, *on)]);
     }
-    spans.push(toggle_span('w', "wrap", app.wrap_preview));
-    spans.push(separator());
-    spans.push(toggle_span('n', "numbers", app.show_line_numbers));
-    spans.push(separator());
-    spans.push(toggle_span('z', "zoom", app.zoom_preview));
-    spans.push(Span::styled(" • t to exit", Style::default().fg(Color::DarkGray)));
+    items.push(vec![toggle_span('w', "wrap", app.wrap_preview)]);
+    items.push(vec![toggle_span('n', "numbers", app.show_line_numbers)]);
+    items.push(vec![toggle_span('z', "zoom", app.zoom_preview)]);
+    items.push(vec![Span::styled("t to exit", gray)]);
+    items
+}
 
-    let para = Paragraph::new(Line::from(spans));
-    f.render_widget(para, area);
+/// Lays out `items` (each an indivisible bullet) into as few lines as fit
+/// within `width`, breaking only between items. The " • " separator is kept
+/// between every pair of items, including across a wrap point (it becomes
+/// the leading token of the continuation line), so the list still reads as
+/// one bulleted sequence. Continuation lines are prefixed with `indent`.
+/// When `space_after_first` is set, the first item is treated as a header
+/// (e.g. "N items" or "Toggles") and is followed by a plain space instead
+/// of a bullet.
+fn wrap_items(
+    items: Vec<Vec<Span<'static>>>,
+    width: u16,
+    indent: &'static str,
+    space_after_first: bool,
+) -> Text<'static> {
+    let bullet = || Span::styled(" • ", Style::default().fg(Color::DarkGray));
+    let indent_width = indent.chars().count() as u16;
+
+    let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut current_width: u16 = 0;
+
+    for (index, item) in items.into_iter().enumerate() {
+        let item_width: u16 = item.iter().map(|s| s.content.chars().count() as u16).sum();
+        let line_indent = if lines.is_empty() { 0 } else { indent_width };
+        let sep = if index == 0 {
+            None
+        } else if index == 1 && space_after_first {
+            Some(Span::raw(" "))
+        } else {
+            Some(bullet())
+        };
+        let sep_width = sep.as_ref().map_or(0, |s| s.content.chars().count() as u16);
+
+        if !current.is_empty() && line_indent + current_width + sep_width + item_width > width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        if let Some(sep) = sep {
+            current_width += sep_width;
+            current.push(sep);
+        }
+        current_width += item_width;
+        current.extend(item);
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+
+    let rendered: Vec<Line<'static>> = lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, spans)| {
+            if i == 0 || indent.is_empty() {
+                Line::from(spans)
+            } else {
+                let mut with_indent = vec![Span::raw(indent)];
+                with_indent.extend(spans);
+                Line::from(with_indent)
+            }
+        })
+        .collect();
+    Text::from(rendered)
 }
 
 fn toggle_span(key: char, label: &str, on: bool) -> Span<'static> {

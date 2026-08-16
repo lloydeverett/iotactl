@@ -13,7 +13,7 @@ use crate::command::Command;
 use crate::entry::Entry;
 use crate::entry_preview;
 use crate::highlight;
-use crate::node_source::{NodeSource, Preview};
+use crate::node_source::{Cancelled, NodeSource, Preview};
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 
@@ -210,7 +210,14 @@ impl FsSource {
         Ok(path)
     }
 
-    fn read_dir_sync(&self, id: &[String]) -> io::Result<Vec<Entry>> {
+    /// `cancelled` is checked once per entry: cheap relative to the syscalls
+    /// each iteration already does, and lets a scan of a huge directory bail
+    /// out promptly once its result is known to be moot (see
+    /// `preview_tui_sync`'s directory-preview branch, the only caller that
+    /// passes a flag anyone actually sets — `read_dir` below always passes a
+    /// fresh, never-cancelled one, since column loads have no supersession
+    /// signal to wire up yet).
+    fn read_dir_sync(&self, id: &[String], cancelled: &Cancelled) -> io::Result<Vec<Entry>> {
         let path = self.path_from_segments(id)?;
         let show_hidden = self.show_hidden.load(Ordering::SeqCst);
         let mut entries = Vec::new();
@@ -220,6 +227,9 @@ impl FsSource {
         let suggested_commands: Arc<[Command]> = Arc::from(Vec::new());
 
         for res in fs::read_dir(&path)? {
+            if cancelled.is_cancelled() {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
             let dir_entry = res?;
             let name = dir_entry.file_name().to_string_lossy().to_string();
             if !show_hidden && name.starts_with('.') {
@@ -262,7 +272,7 @@ impl FsSource {
         Ok(entries)
     }
 
-    fn preview_tui_sync(&self, id: &[String]) -> Preview {
+    fn preview_tui_sync(&self, id: &[String], cancelled: &Cancelled) -> Preview {
         let path = match self.path_from_segments(id) {
             Ok(path) => path,
             Err(e) => return Preview::new(error_text(e.to_string())),
@@ -274,7 +284,7 @@ impl FsSource {
             };
         }
         match fs::metadata(&path) {
-            Ok(meta) if meta.is_dir() => match self.read_dir_sync(id) {
+            Ok(meta) if meta.is_dir() => match self.read_dir_sync(id, cancelled) {
                 Ok(entries) => Preview {
                     text: entry_preview::format_dir_preview(&entries, self.nerd_font),
                     override_disable_line_numbers: true,
@@ -292,7 +302,7 @@ impl NodeSource for FsSource {
     async fn read_dir(&self, id: &[String]) -> io::Result<Vec<Entry>> {
         let source = self.clone();
         let id = id.to_vec();
-        tokio::task::spawn_blocking(move || source.read_dir_sync(&id))
+        tokio::task::spawn_blocking(move || source.read_dir_sync(&id, &Cancelled::new()))
             .await
             .unwrap_or_else(|_| {
                 Err(io::Error::other("panicked while reading directory"))
@@ -316,10 +326,11 @@ impl NodeSource for FsSource {
         }
     }
 
-    async fn preview_tui(&self, id: &[String]) -> Preview {
+    async fn preview_tui(&self, id: &[String], cancelled: &Cancelled) -> Preview {
         let source = self.clone();
         let id = id.to_vec();
-        tokio::task::spawn_blocking(move || source.preview_tui_sync(&id))
+        let cancelled = cancelled.clone();
+        tokio::task::spawn_blocking(move || source.preview_tui_sync(&id, &cancelled))
             .await
             .unwrap_or_else(|_| {
                 Preview::new(error_text("panicked while loading preview".to_string()))

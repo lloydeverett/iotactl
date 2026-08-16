@@ -61,3 +61,9 @@ This depends on a great search feature having already been implemented! But see 
 
 As in, be able to open not just directories, but allow for the case where one previews a file directly.
 
+## Vim-style marks
+
+And this can probably turn into a clipboard.
+
+Could even have a marks view in a dialog.
+

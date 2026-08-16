@@ -8,7 +8,7 @@ use ratatui::widgets::{ListState, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use crate::entry::Entry;
-use crate::node_source::NodeSource;
+use crate::node_source::{Cancelled, NodeSource};
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 
@@ -102,6 +102,12 @@ pub struct App {
     /// When the in-flight preview fetch started, if any. Used to debounce
     /// the loading placeholder.
     preview_loading_since: Option<Instant>,
+    /// Cancellation flag handed to the in-flight preview fetch, if any.
+    /// `dispatch_preview_update_inner` flips it before replacing it with a
+    /// fresh one for the new fetch, so a source that checks it (see
+    /// `Cancelled`) can stop expensive work early once it's known to be
+    /// superseded rather than running to completion for nothing.
+    preview_cancel: Option<Cancelled>,
     /// Whether keyboard focus is on the preview pane rather than the
     /// column stack. Only reachable for file entries; directories are
     /// opened as a new column instead.
@@ -183,6 +189,7 @@ impl App {
             preview_override_disable_line_numbers: false,
             preview_loading: false,
             preview_loading_since: None,
+            preview_cancel: None,
             preview_focused: false,
             preview_scroll: 0,
             preview_scroll_restore_percent: None,
@@ -204,7 +211,7 @@ impl App {
         app.columns.push(col);
         app.sync_focused_list_state();
         if let Some(entry) = app.selected_entry() {
-            let preview = app.source.preview_tui(&entry.id).await;
+            let preview = app.source.preview_tui(&entry.id, &Cancelled::new()).await;
             app.preview = preview.text;
             app.preview_override_disable_line_numbers = preview.override_disable_line_numbers;
         }
@@ -390,6 +397,9 @@ impl App {
             self.preview_scroll_restore_percent = None;
         }
         let Some(id) = self.selected_entry().map(|entry| entry.id.clone()) else {
+            if let Some(cancelled) = self.preview_cancel.take() {
+                cancelled.cancel();
+            }
             self.preview = SanitizedText::default();
             self.preview_override_disable_line_numbers = false;
             self.preview_loading = false;
@@ -397,6 +407,12 @@ impl App {
             self.preview_scroll_restore_percent = None;
             return;
         };
+
+        if let Some(cancelled) = self.preview_cancel.take() {
+            cancelled.cancel();
+        }
+        let cancelled = Cancelled::new();
+        self.preview_cancel = Some(cancelled.clone());
 
         self.epoch += 1;
         let epoch = self.epoch;
@@ -410,7 +426,7 @@ impl App {
         });
 
         tokio::spawn(async move {
-            let preview = source.preview_tui(&id).await;
+            let preview = source.preview_tui(&id, &cancelled).await;
             let _ = tx.send(AppUpdate::PreviewLoaded {
                 epoch,
                 text: preview.text,

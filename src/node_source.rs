@@ -1,4 +1,5 @@
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -7,6 +8,38 @@ use crate::command::Command;
 use crate::entry::Entry;
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
+
+/// A cheap, cloneable "has this call been superseded?" signal passed into
+/// [`NodeSource::preview_tui`]. The caller (`App`) flips it via `cancel()`
+/// once a newer request has made the in-flight one moot — e.g. the user
+/// moved the selection again before the previous preview finished loading.
+///
+/// Checking it is purely advisory: `App` still discards a result that
+/// arrives after cancellation (by epoch, separately from this flag), so a
+/// source is free to ignore `Cancelled` entirely and just run to
+/// completion. But for work with a natural per-iteration checkpoint — e.g.
+/// scanning a large directory entry by entry — checking `is_cancelled()`
+/// there lets the source bail out early instead of finishing an expensive
+/// computation whose result was already known to be thrown away. It won't
+/// help work that has no such checkpoint, like a single bounded read.
+#[derive(Clone, Default)]
+pub struct Cancelled(Arc<AtomicBool>);
+
+impl Cancelled {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Marks the call this flag was handed to as superseded.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether `cancel` has been called.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
 
 /// What [`NodeSource::preview_tui`] returns: the styled preview text, plus
 /// whatever the source knows about how it should be displayed that the UI
@@ -53,7 +86,15 @@ pub trait NodeSource: Send + Sync {
     /// `SanitizedText` rather than a raw `Text` so every implementation is
     /// forced through the escaping in [`crate::sanitize`] — see that
     /// module's docs for why that matters.
-    async fn preview_tui(&self, id: &[String]) -> Preview;
+    ///
+    /// `cancelled` is flipped once this call is superseded by a newer one
+    /// (e.g. the user already moved the selection again). Implementations
+    /// with a natural checkpoint for expensive work — a loop over many
+    /// entries, a chunked read, a paginated network fetch — are encouraged
+    /// to check it there and bail out early wherever that's practical; it's
+    /// purely advisory, and it's fine to ignore it when there's no sensible
+    /// place to check.
+    async fn preview_tui(&self, id: &[String], cancelled: &Cancelled) -> Preview;
 
     /// The commands this source makes available, independent of any
     /// particular node. Not yet invoked anywhere.
