@@ -614,11 +614,15 @@ impl App {
                 if epoch != self.epoch {
                     return;
                 }
-                // Remember the previously selected entry so that, if it's
-                // still there after the reload (e.g. toggling hidden files
-                // while the cursor sits on an always-visible entry), the
-                // preview is left completely untouched rather than
-                // flickering through an unfocus-and-refetch.
+                // Remember the previously selected entry so we only unfocus
+                // the preview pane (as `enter`/`go_up` do) when the reload
+                // actually moved the cursor onto a different entry — e.g.
+                // toggling hidden files while the cursor sits on an
+                // always-visible one. The preview itself is always refetched
+                // below regardless: a source toggle is a black box from
+                // here, and one like "render" changes `preview_tui`'s output
+                // for the very entry that's still selected, so the fetch
+                // can't be skipped just because the selection didn't move.
                 let previous_selection = self.selected_entry().map(|e| e.id.clone());
 
                 let mut new_columns = Vec::with_capacity(results.len());
@@ -638,8 +642,8 @@ impl App {
                     self.selected_entry().map(|e| &e.id) == previous_selection.as_ref();
                 if !same_selection {
                     self.preview_focused = false;
-                    self.dispatch_preview_update();
                 }
+                self.dispatch_preview_update();
             }
         }
     }

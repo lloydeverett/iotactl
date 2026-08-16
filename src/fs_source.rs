@@ -23,6 +23,14 @@ const PREVIEW_READ_LIMIT: usize = 64 * 1024;
 /// parameter.
 const HIDDEN_TOGGLE_NAME: &str = "hidden";
 
+/// Name of the toggle, exposed via `available_toggles`, that controls
+/// whether markdown formatting characters (`#`, ```` ``` ````, `*`, ...) are
+/// hidden from previews. On while off, the underlying syntax highlighting
+/// (e.g. headings/emphasis/code spans still being colored) is unaffected —
+/// see `highlight::highlight`'s `hide_markers` parameter, which this toggle
+/// drives directly.
+const RENDER_TOGGLE_NAME: &str = "render";
+
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
     if bytes == 0 {
@@ -52,6 +60,9 @@ pub struct FsSource {
     /// root sees the same toggle state, since `read_dir`/`preview_tui` clone
     /// `self` into a blocking task on every call.
     show_hidden: Arc<AtomicBool>,
+    /// Same sharing rationale as `show_hidden`. Defaults to `true`: render
+    /// mode is the normal way to view markdown.
+    render_markdown: Arc<AtomicBool>,
 }
 
 impl FsSource {
@@ -59,6 +70,7 @@ impl FsSource {
         FsSource {
             root,
             show_hidden: Arc::new(AtomicBool::new(false)),
+            render_markdown: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -141,7 +153,7 @@ impl FsSource {
                 Ok(entries) => preview_dir(&entries),
                 Err(e) => error_text(e.to_string()),
             },
-            Ok(_) => preview_file(&path),
+            Ok(_) => preview_file(&path, self.render_markdown.load(Ordering::SeqCst)),
             Err(e) => error_text(e.to_string()),
         }
     }
@@ -172,15 +184,24 @@ impl NodeSource for FsSource {
     }
 
     fn available_toggles(&self) -> Arc<[Toggle]> {
-        Arc::from(vec![Toggle {
-            name: HIDDEN_TOGGLE_NAME.to_string(),
-            key: 'H',
-        }])
+        Arc::from(vec![
+            Toggle {
+                name: HIDDEN_TOGGLE_NAME.to_string(),
+                key: 'H',
+            },
+            Toggle {
+                name: RENDER_TOGGLE_NAME.to_string(),
+                key: 'r',
+            },
+        ])
     }
 
     async fn set_toggle(&self, toggle: &Toggle, value: bool) -> io::Result<()> {
         if toggle.name == HIDDEN_TOGGLE_NAME {
             self.show_hidden.store(value, Ordering::SeqCst);
+            Ok(())
+        } else if toggle.name == RENDER_TOGGLE_NAME {
+            self.render_markdown.store(value, Ordering::SeqCst);
             Ok(())
         } else {
             Err(io::Error::new(
@@ -193,6 +214,8 @@ impl NodeSource for FsSource {
     async fn get_toggle(&self, toggle: &Toggle) -> io::Result<bool> {
         if toggle.name == HIDDEN_TOGGLE_NAME {
             Ok(self.show_hidden.load(Ordering::SeqCst))
+        } else if toggle.name == RENDER_TOGGLE_NAME {
+            Ok(self.render_markdown.load(Ordering::SeqCst))
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -249,7 +272,7 @@ fn preview_dir(entries: &[Entry]) -> SanitizedText {
     SanitizedText::assume_sanitized(lines)
 }
 
-fn preview_file(path: &Path) -> SanitizedText {
+fn preview_file(path: &Path, hide_markers: bool) -> SanitizedText {
     let mut file = match fs::File::open(path) {
         Ok(f) => f,
         Err(e) => return error_text(e.to_string()),
@@ -273,7 +296,7 @@ fn preview_file(path: &Path) -> SanitizedText {
     match String::from_utf8(buf) {
         Ok(text) => {
             let sanitized = SanitizedText::from_text(&text, Style::default());
-            match highlight::highlight(path, &sanitized.plain()) {
+            match highlight::highlight(path, &sanitized.plain(), hide_markers) {
                 // Safe: the highlighter only re-slices and re-styles the
                 // already-sanitized plain text handed to it above, so it
                 // can't introduce a raw control character of its own.

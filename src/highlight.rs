@@ -150,26 +150,32 @@ const MARKDOWN_BLOCK_INJECTIONS_QUERY: &str = r#"
 
 /// Same as upstream `tree_sitter_md::HIGHLIGHT_QUERY_BLOCK`, except
 /// `(fenced_code_block)` (the container spanning the delimiters *and* the
-/// content) is dropped from the `@text.literal` capture, replaced by
-/// `(fenced_code_block_delimiter)` and `(info_string)` specifically — i.e.
-/// just the ` ```json ` / ` ``` ` lines, not `(code_fence_content)` itself
-/// (the now-pointless `(code_fence_content) @none` that used to cancel the
-/// inherited tint over the content is dropped too). Tried recognizing
-/// `@none` first — mapping it to `Style::default()` to explicitly cancel
-/// the green tint over the content — but `(code_fence_content)`'s span is
-/// *exactly* the injected python/html/etc. layer's content range, and that
-/// exact-boundary overlap between the outer "none" highlight and the
-/// injected layer corrupts tree-sitter-highlight's cross-layer event
-/// ordering: a keyword's own `HighlightEnd` (e.g. after `def`) got swapped
-/// with the far-later `@none` region's end, so the highlight span leaked
-/// across unrelated tokens several lines down. Simplest correct fix is to
-/// just never apply an outer tint to `(code_fence_content)` in the first
-/// place — its delimiter/info_string siblings don't overlap the injected
-/// range at all, so styling *them* is safe, and injected content renders
-/// with its own real styling (or plain, if the fence's language isn't
-/// recognized) with no ancestor style for anything to fight over.
-/// `(indented_code_block)` also keeps `@text.literal` outright: it has no
-/// language info, so it's never a target of an injection either.
+/// content) is dropped entirely, replaced by `(fenced_code_block_delimiter)`
+/// and `(info_string)` specifically — i.e. just the ` ```json ` / ` ``` `
+/// lines, not `(code_fence_content)` itself (the now-pointless
+/// `(code_fence_content) @none` that used to cancel the inherited tint over
+/// the content is dropped too). Tried recognizing `@none` first — mapping it
+/// to `Style::default()` to explicitly cancel the green tint over the
+/// content — but `(code_fence_content)`'s span is *exactly* the injected
+/// python/html/etc. layer's content range, and that exact-boundary overlap
+/// between the outer "none" highlight and the injected layer corrupts
+/// tree-sitter-highlight's cross-layer event ordering: a keyword's own
+/// `HighlightEnd` (e.g. after `def`) got swapped with the far-later `@none`
+/// region's end, so the highlight span leaked across unrelated tokens
+/// several lines down. Simplest correct fix is to just never apply an outer
+/// tint to `(code_fence_content)` in the first place — its delimiter/
+/// info_string siblings don't overlap the injected range at all, so
+/// tagging *them* is safe, and injected content renders with its own real
+/// styling (or plain, if the fence's language isn't recognized) with no
+/// ancestor style for anything to fight over.
+///
+/// The delimiter/info_string pair is tagged `@punctuation.special` (not
+/// `@text.literal`) so `highlight()`'s `hide_markers` mode — see that
+/// function's doc comment — hides the whole ` ```json `/` ``` ` line, same
+/// as it hides `#` heading markers and list bullets.
+/// `(indented_code_block)` keeps `@text.literal` outright: it has no
+/// language info, so it's never a target of an injection either, and it has
+/// no delimiter of its own to hide.
 const MARKDOWN_BLOCK_HIGHLIGHTS_QUERY: &str = r#"
 (atx_heading
   (atx_h1_marker)
@@ -217,8 +223,6 @@ const MARKDOWN_BLOCK_HIGHLIGHTS_QUERY: &str = r#"
 [
   (link_title)
   (indented_code_block)
-  (fenced_code_block_delimiter)
-  (info_string)
 ] @text.literal
 
 (link_destination) @text.uri
@@ -232,6 +236,8 @@ const MARKDOWN_BLOCK_HIGHLIGHTS_QUERY: &str = r#"
   (list_marker_dot)
   (list_marker_parenthesis)
   (thematic_break)
+  (fenced_code_block_delimiter)
+  (info_string)
 ] @punctuation.special
 
 [
@@ -240,6 +246,71 @@ const MARKDOWN_BLOCK_HIGHLIGHTS_QUERY: &str = r#"
 ] @punctuation.special
 
 (backslash_escape) @string.escape
+"#;
+
+/// Same as upstream `tree_sitter_md::HIGHLIGHT_QUERY_INLINE`, except
+/// `(emphasis_delimiter)` and `(code_span_delimiter)` — the `*`/`**` around
+/// emphasis/strong text and the `` ` `` around a code span — are tagged
+/// `@punctuation.special` instead of upstream's `@punctuation.delimiter`.
+/// `punctuation.delimiter` isn't in `RECOGNIZED_NAMES`, so upstream's
+/// delimiters render as plain, undecorated text; `punctuation.special` is
+/// the same "markdown marker" bucket used by `MARKDOWN_BLOCK_HIGHLIGHTS_QUERY`
+/// for heading/list/quote markers, which both styles them (dim, like every
+/// other marker) and makes them eligible for `highlight()`'s `hide_markers`
+/// mode.
+const MARKDOWN_INLINE_HIGHLIGHTS_QUERY: &str = r#"
+[
+  (code_span)
+  (link_title)
+] @text.literal
+
+[
+  (emphasis_delimiter)
+  (code_span_delimiter)
+] @punctuation.special
+
+(emphasis) @text.emphasis
+
+(strong_emphasis) @text.strong
+
+[
+  (link_destination)
+  (uri_autolink)
+] @text.uri
+
+[
+  (link_label)
+  (link_text)
+  (image_description)
+] @text.reference
+
+[
+  (backslash_escape)
+  (hard_line_break)
+] @string.escape
+
+(image
+  [
+    "!"
+    "["
+    "]"
+    "("
+    ")"
+  ] @punctuation.delimiter)
+
+(inline_link
+  [
+    "["
+    "]"
+    "("
+    ")"
+  ] @punctuation.delimiter)
+
+(shortcut_link
+  [
+    "["
+    "]"
+  ] @punctuation.delimiter)
 "#;
 
 /// Same as upstream `tree_sitter_json::HIGHLIGHTS_QUERY`, with `(pair key:
@@ -470,7 +541,7 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
             build_config(
                 tree_sitter_md::INLINE_LANGUAGE,
                 "markdown_inline",
-                tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
+                MARKDOWN_INLINE_HIGHLIGHTS_QUERY,
                 tree_sitter_md::INJECTION_QUERY_INLINE,
             ),
         );
@@ -577,7 +648,23 @@ fn language_for(path: &Path, text: &str) -> Option<&'static str> {
 /// filename, extension, or — for extensionless files — a `#!` shebang line
 /// in `text`). Returns `None` when nothing is recognized, so the caller can
 /// fall back to rendering plain text.
-pub fn highlight(path: &Path, text: &str) -> Option<Vec<Line<'static>>> {
+///
+/// `hide_markers` drives markdown "render" mode: when set, every span
+/// captured as `@punctuation.special` — the markdown-only capture name used
+/// for formatting decoration such as `#` heading markers, list bullets,
+/// blockquote markers, ` ``` `/info-string fence lines, and `*`/`**`/`` ` ``
+/// emphasis and code-span delimiters (see `MARKDOWN_BLOCK_HIGHLIGHTS_QUERY`
+/// and `MARKDOWN_INLINE_HIGHLIGHTS_QUERY`) — is dropped from the output
+/// instead of rendered, while everything else (including syntax highlighting
+/// driven by the presence of those characters, e.g. a heading's color or
+/// emphasis's italics) is computed exactly as it would be with the markers
+/// shown. Has no effect on non-markdown languages, since none of them
+/// produce a `@punctuation.special` capture. A plain, uncaptured whitespace
+/// run immediately following a hidden marker on the same line — e.g. the
+/// space between an ATX `#` marker and its heading text, which the grammar
+/// leaves outside of any node — is swallowed too, so hiding a marker never
+/// leaves a dangling leading gap.
+pub fn highlight(path: &Path, text: &str, hide_markers: bool) -> Option<Vec<Line<'static>>> {
     let lang_name = language_for(path, text)?;
     let config = registry().get(lang_name).expect("registered above");
 
@@ -590,6 +677,7 @@ pub fn highlight(path: &Path, text: &str) -> Option<Vec<Line<'static>>> {
 
     let mut lines: Vec<Vec<Span<'static>>> = vec![Vec::new()];
     let mut name_stack: Vec<&str> = Vec::new();
+    let mut swallow_leading_space = false;
 
     for event in events {
         match event.ok()? {
@@ -600,12 +688,36 @@ pub fn highlight(path: &Path, text: &str) -> Option<Vec<Line<'static>>> {
                 name_stack.pop();
             }
             HighlightEvent::Source { start, end } => {
-                let style = name_stack
-                    .last()
-                    .and_then(|name| style_for(name))
-                    .unwrap_or_default();
+                let name = name_stack.last().copied();
+                let hidden = hide_markers && name == Some("punctuation.special");
 
-                let region = &text[start..end];
+                let mut region = &text[start..end];
+                if swallow_leading_space && name.is_none() {
+                    region = region.trim_start_matches(' ');
+                }
+                // Only an ATX heading marker (`#` through `######`, and
+                // nothing else markdown ever tags `@punctuation.special`)
+                // leaves a plain, uncaptured gap before the next node — list
+                // markers and blockquote markers fold their trailing space
+                // into the marker node itself, and every other marker type
+                // (fence delimiters, emphasis/code-span delimiters, ...) sits
+                // directly against its neighboring content. So swallowing
+                // must key off the marker's own text, not just "was hidden",
+                // or hiding e.g. a closing `*` would eat the real space that
+                // follows it in the surrounding prose.
+                swallow_leading_space =
+                    hidden && !region.is_empty() && region.chars().all(|c| c == '#');
+
+                if hidden {
+                    // Walk newlines so line boundaries stay correct, but
+                    // emit no spans for the hidden marker text itself.
+                    for _ in 0..region.matches('\n').count() {
+                        lines.push(Vec::new());
+                    }
+                    continue;
+                }
+
+                let style = name.and_then(style_for).unwrap_or_default();
                 let mut region_lines = region.split('\n');
                 if let Some(first) = region_lines.next() {
                     if !first.is_empty() {
@@ -640,22 +752,38 @@ mod tests {
     fn markdown_inline_emphasis_is_highlighted() {
         let path = Path::new("sample.md");
         let text = "This has *italic* and **bold** text.\n";
-        let lines = highlight(path, text).unwrap();
+        let lines = highlight(path, text, false).unwrap();
         let spans = &lines[0].spans;
         let styled_texts: Vec<(&str, Style)> =
             spans.iter().map(|s| (s.content.as_ref(), s.style)).collect();
 
+        // The `*`/`**` delimiters are their own `@punctuation.special` spans
+        // (dim, split out from the emphasis/strong text) rather than part of
+        // the italic/bold span, so `highlight()`'s `hide_markers` mode can
+        // drop just the delimiters — see MARKDOWN_INLINE_HIGHLIGHTS_QUERY's
+        // doc comment.
         assert!(
             styled_texts
                 .iter()
-                .any(|(t, s)| *t == "*italic*" && s.add_modifier.contains(Modifier::ITALIC)),
-            "expected an italic span for *italic*, got {styled_texts:?}"
+                .any(|(t, s)| *t == "italic" && s.add_modifier.contains(Modifier::ITALIC)),
+            "expected an italic span for italic, got {styled_texts:?}"
         );
         assert!(
             styled_texts
                 .iter()
-                .any(|(t, s)| *t == "**bold**" && s.add_modifier.contains(Modifier::BOLD)),
-            "expected a bold span for **bold**, got {styled_texts:?}"
+                .any(|(t, s)| *t == "bold" && s.add_modifier.contains(Modifier::BOLD)),
+            "expected a bold span for bold, got {styled_texts:?}"
+        );
+        // `**` is scanned as two single-`*` `emphasis_delimiter` tokens
+        // rather than one two-char token, so italic contributes 2 dim `*`
+        // spans and bold contributes 4.
+        assert_eq!(
+            styled_texts
+                .iter()
+                .filter(|(t, s)| *t == "*" && s.fg == Some(Color::DarkGray))
+                .count(),
+            6,
+            "expected all six `*` delimiter chars dim, got {styled_texts:?}"
         );
     }
 
@@ -663,7 +791,7 @@ mod tests {
     fn fenced_html_block_is_highlighted() {
         let path = Path::new("sample.md");
         let text = "```html\n<div class=\"foo\">bar</div>\n```\n";
-        let lines = highlight(path, text).unwrap();
+        let lines = highlight(path, text, false).unwrap();
         let spans = &lines[1].spans;
         let styled_texts: Vec<(&str, Style)> =
             spans.iter().map(|s| (s.content.as_ref(), s.style)).collect();
@@ -688,7 +816,7 @@ mod tests {
     fn fenced_json_block_is_highlighted() {
         let path = Path::new("sample.md");
         let text = "```json\n{\"foo\": \"value\", \"bar\": 42, \"baz\": true}\n```\n";
-        let lines = highlight(path, text).unwrap();
+        let lines = highlight(path, text, false).unwrap();
         let spans = &lines[1].spans;
         let styled_texts: Vec<(&str, Style)> =
             spans.iter().map(|s| (s.content.as_ref(), s.style)).collect();
@@ -722,6 +850,12 @@ mod tests {
             "expected string value `\"value\"` highlighted as a string (green), got {styled_texts:?}"
         );
 
+        // The fence delimiter and info string are `@punctuation.special`
+        // (dim, like every other markdown marker) rather than tinted by the
+        // fence's own language, so they don't fight visually with the
+        // fenced content's real highlighting and so `highlight()`'s
+        // `hide_markers` mode can hide them — see
+        // MARKDOWN_BLOCK_HIGHLIGHTS_QUERY's doc comment.
         let opening_fence: Vec<(&str, Style)> = lines[0]
             .spans
             .iter()
@@ -730,8 +864,8 @@ mod tests {
         assert!(
             opening_fence
                 .iter()
-                .all(|(_, s)| s.fg == Some(Color::Green)),
-            "expected the whole opening fence line (```json) to be green, got {opening_fence:?}"
+                .all(|(_, s)| s.fg == Some(Color::DarkGray)),
+            "expected the whole opening fence line (```json) to be dim, got {opening_fence:?}"
         );
         let closing_fence: Vec<(&str, Style)> = lines[2]
             .spans
@@ -741,8 +875,8 @@ mod tests {
         assert!(
             closing_fence
                 .iter()
-                .all(|(_, s)| s.fg == Some(Color::Green)),
-            "expected the closing fence line (```) to be green, got {closing_fence:?}"
+                .all(|(_, s)| s.fg == Some(Color::DarkGray)),
+            "expected the closing fence line (```) to be dim, got {closing_fence:?}"
         );
     }
 
@@ -754,7 +888,7 @@ mod tests {
         // after `def`. See MARKDOWN_BLOCK_HIGHLIGHTS_QUERY's doc comment.
         let path = Path::new("sample.md");
         let text = "```python\ndef foo():\n    return 42\n```\n";
-        let lines = highlight(path, text).unwrap();
+        let lines = highlight(path, text, false).unwrap();
         let spans = &lines[1].spans;
         let styled_texts: Vec<(&str, Style)> =
             spans.iter().map(|s| (s.content.as_ref(), s.style)).collect();
@@ -787,7 +921,7 @@ mod tests {
         // registry/query wiring can't hide behind markdown-only coverage.
         let path = Path::new("sample.rs");
         let text = "fn main() {\n    let x = 42;\n}\n";
-        let lines = highlight(path, text).unwrap();
+        let lines = highlight(path, text, false).unwrap();
         let styled_texts: Vec<(&str, Style)> = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -819,14 +953,14 @@ mod tests {
     #[test]
     fn unrecognized_extension_returns_none() {
         let path = Path::new("sample.this-extension-does-not-exist");
-        assert!(highlight(path, "hello\n").is_none());
+        assert!(highlight(path, "hello\n", false).is_none());
     }
 
     #[test]
     fn dockerfile_is_recognized_by_bare_filename() {
         let path = Path::new("Dockerfile");
         let text = "FROM ubuntu:22.04\nRUN echo hi\n";
-        let lines = highlight(path, text).unwrap();
+        let lines = highlight(path, text, false).unwrap();
         let styled_texts: Vec<(&str, Style)> = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -851,14 +985,14 @@ mod tests {
     fn dockerfile_suffixed_variant_is_recognized() {
         let path = Path::new("Dockerfile.dev");
         let text = "FROM scratch\n";
-        assert!(highlight(path, text).is_some());
+        assert!(highlight(path, text, false).is_some());
     }
 
     #[test]
     fn cargo_lock_is_highlighted_as_toml() {
         let path = Path::new("Cargo.lock");
         let text = "# This file is automatically generated by Cargo.\nversion = 4\n\n[[package]]\nname = \"iotactl\"\n";
-        let lines = highlight(path, text).unwrap();
+        let lines = highlight(path, text, false).unwrap();
         let styled_texts: Vec<(&str, Style)> = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -877,7 +1011,7 @@ mod tests {
     fn shebang_detects_python_for_extensionless_file() {
         let path = Path::new("myscript");
         let text = "#!/usr/bin/env python3\ndef foo():\n    return 1\n";
-        let lines = highlight(path, text).unwrap();
+        let lines = highlight(path, text, false).unwrap();
         let styled_texts: Vec<(&str, Style)> = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -896,7 +1030,7 @@ mod tests {
     fn shebang_detects_bash_without_env_wrapper() {
         let path = Path::new("myscript");
         let text = "#!/bin/bash\necho hi\n";
-        assert!(highlight(path, text).is_some());
+        assert!(highlight(path, text, false).is_some());
     }
 
     #[test]
@@ -905,7 +1039,7 @@ mod tests {
         // highlighted as Python, since the extension is the stronger signal.
         let path = Path::new("script.py");
         let text = "#!/bin/sh\ndef foo():\n    return 1\n";
-        let lines = highlight(path, text).unwrap();
+        let lines = highlight(path, text, false).unwrap();
         let styled_texts: Vec<(&str, Style)> = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -923,7 +1057,7 @@ mod tests {
     #[test]
     fn no_shebang_and_no_extension_returns_none() {
         let path = Path::new("myscript");
-        assert!(highlight(path, "just some text\n").is_none());
+        assert!(highlight(path, "just some text\n", false).is_none());
     }
 
     #[test]
@@ -934,7 +1068,7 @@ mod tests {
         // plain, unstyled text rather than panicking or losing content.
         let path = Path::new("sample.md");
         let text = "```not-a-real-language\nsome content here\n```\n";
-        let lines = highlight(path, text).unwrap();
+        let lines = highlight(path, text, false).unwrap();
         let content_line: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(content_line, "some content here");
         assert!(
@@ -952,7 +1086,7 @@ mod tests {
         // actually exercised by a test.
         let path = Path::new("sample.md");
         let text = "---\nkey: value\n---\n";
-        let lines = highlight(path, text).unwrap();
+        let lines = highlight(path, text, false).unwrap();
         let styled_texts: Vec<(&str, Style)> = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -977,7 +1111,7 @@ mod tests {
     fn heading_levels_get_distinct_colors() {
         let path = Path::new("sample.md");
         let text = "# One\n## Two\n### Three\n#### Four\n##### Five\n###### Six\n";
-        let lines = highlight(path, text).unwrap();
+        let lines = highlight(path, text, false).unwrap();
         let heading_style = |line: usize, text_content: &str| {
             lines[line]
                 .spans
@@ -1011,7 +1145,7 @@ mod tests {
     fn setext_headings_get_distinct_colors() {
         let path = Path::new("sample.md");
         let text = "Title One\n=========\n\nTitle Two\n---------\n";
-        let lines = highlight(path, text).unwrap();
+        let lines = highlight(path, text, false).unwrap();
 
         let one_color = lines[0]
             .spans
@@ -1037,6 +1171,117 @@ mod tests {
         assert_ne!(
             one_color, two_color,
             "expected setext h1 and h2 to have distinct colors"
+        );
+    }
+
+    #[test]
+    fn hide_markers_strips_atx_heading_marker_and_gap() {
+        let path = Path::new("sample.md");
+        let text = "# Header\n";
+        let lines = highlight(path, text, true).unwrap();
+        let rendered: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            rendered, "Header",
+            "expected the `#` marker and the gap after it both dropped, got {:?}",
+            lines[0].spans
+        );
+        let heading_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "Header")
+            .expect("Header span");
+        assert!(
+            heading_span.style.fg == Some(Color::Red) && heading_span.style.add_modifier.contains(Modifier::BOLD),
+            "expected heading styling preserved even with markers hidden, got {:?}",
+            heading_span.style
+        );
+    }
+
+    #[test]
+    fn hide_markers_blanks_fenced_code_delimiter_lines() {
+        let path = Path::new("sample.md");
+        let text = "```rust\nfn f() {}\n```\n";
+        let lines = highlight(path, text, true).unwrap();
+        assert!(
+            lines[0].spans.is_empty(),
+            "expected the opening ``` fence line to be blank, got {:?}",
+            lines[0].spans
+        );
+        assert!(
+            lines[2].spans.is_empty(),
+            "expected the closing ``` fence line to be blank, got {:?}",
+            lines[2].spans
+        );
+        let content: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(content, "fn f() {}");
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == "fn" && s.style.fg == Some(Color::Magenta)),
+            "expected fenced content to still be syntax-highlighted with markers hidden, got {:?}",
+            lines[1].spans
+        );
+    }
+
+    #[test]
+    fn hide_markers_strips_emphasis_and_code_span_delimiters() {
+        let path = Path::new("sample.md");
+        let text = "This is *italic* and `code`.\n";
+        let lines = highlight(path, text, true).unwrap();
+        let rendered: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(rendered, "This is italic and code.");
+        let italic_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "italic")
+            .expect("italic span");
+        assert!(
+            italic_span.style.add_modifier.contains(Modifier::ITALIC),
+            "expected emphasis styling preserved even with the `*` delimiters hidden, got {:?}",
+            italic_span.style
+        );
+        let code_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "code")
+            .expect("code span");
+        assert_eq!(
+            code_span.style.fg,
+            Some(Color::Green),
+            "expected code-span styling preserved even with the ` delimiters hidden, got {:?}",
+            code_span.style
+        );
+    }
+
+    #[test]
+    fn hide_markers_strips_list_and_blockquote_markers() {
+        let path = Path::new("sample.md");
+        let text = "- item one\n> quoted\n";
+        let lines = highlight(path, text, true).unwrap();
+        let line0: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let line1: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(line0, "item one");
+        assert_eq!(line1, "quoted");
+    }
+
+    #[test]
+    fn hide_markers_is_noop_for_non_markdown() {
+        let path = Path::new("sample.rs");
+        let text = "fn main() {\n    let x = 42;\n}\n";
+        let shown = highlight(path, text, false).unwrap();
+        let hidden = highlight(path, text, true).unwrap();
+        let render = |lines: &[Line<'static>]| -> String {
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+        assert_eq!(
+            render(&shown),
+            render(&hidden),
+            "hide_markers should have no effect on a language with no @punctuation.special capture"
         );
     }
 }
