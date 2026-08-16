@@ -182,16 +182,24 @@ impl FsSource {
     }
 
     /// Resolves `id` to a real path under `root`, rejecting any segment
-    /// that could step outside it (`.`, `..`) or that smuggles a separator
-    /// (e.g. `"a/../b"` as a single segment).
+    /// that could step outside it or otherwise isn't a plain filename: `.`,
+    /// `..`, a segment that smuggles a separator (e.g. `"a/../b"` as a
+    /// single segment), or — on Windows — a drive/UNC prefix like `"C:"` or
+    /// `"C:foo"`, which `PathBuf::push` treats as an instruction to replace
+    /// the whole path rather than append to it, since none of those
+    /// characters are literal path separators there. A segment is accepted
+    /// only if `Path::new(segment)` parses as exactly one `Normal`
+    /// component, which rules out all of the above uniformly on every
+    /// platform instead of hand-picking characters to block.
     fn path_from_segments(&self, id: &[String]) -> io::Result<PathBuf> {
         let mut path = self.root.clone();
         for segment in id {
-            if segment.is_empty()
-                || segment == "."
-                || segment == ".."
-                || segment.contains(std::path::is_separator)
-            {
+            let mut components = Path::new(segment).components();
+            let is_plain_name = matches!(
+                (components.next(), components.next()),
+                (Some(std::path::Component::Normal(_)), None)
+            );
+            if !is_plain_name {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("invalid path segment: {segment:?}"),
