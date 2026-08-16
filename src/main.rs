@@ -1,6 +1,7 @@
 mod app;
 mod command;
 mod entry;
+mod entry_preview;
 mod fs_source;
 mod highlight;
 mod node_source;
@@ -10,8 +11,10 @@ mod ui;
 
 use std::env;
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use clap::Parser;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -28,22 +31,32 @@ use fs_source::FsSource;
 const PAGE_SIZE: i32 = 10;
 const HALF_PAGE_SIZE: i32 = PAGE_SIZE / 2;
 
+/// Ranger-style TUI file browser.
+#[derive(Parser)]
+#[command(version, about)]
+struct Cli {
+    /// Directory to start browsing from. Defaults to the current directory.
+    path: Option<PathBuf>,
+
+    /// Show Nerd Font icons to the left of filenames, in listings and
+    /// window titles. Requires a terminal font patched with Nerd Fonts.
+    #[arg(long)]
+    nerd_font: bool,
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let start_dir = env::args()
-        .nth(1)
-        .map(std::path::PathBuf::from)
+    let cli = Cli::parse();
+
+    let start_dir = cli
+        .path
         .unwrap_or_else(|| env::current_dir().expect("failed to get current directory"))
         .canonicalize()?;
 
-    let root_label = start_dir
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| start_dir.display().to_string());
-
     let (tx, rx) = mpsc::unbounded_channel::<AppUpdate>();
-    let source: Arc<dyn node_source::NodeSource> = Arc::new(FsSource::new(start_dir));
-    let app = App::new(Vec::new(), root_label, source, tx).await;
+    let source: Arc<dyn node_source::NodeSource> =
+        Arc::new(FsSource::new(start_dir, cli.nerd_font));
+    let app = App::new(Vec::new(), source, tx, cli.nerd_font).await;
 
     let mut terminal = setup_terminal()?;
     let result = run(&mut terminal, app, rx).await;

@@ -20,6 +20,14 @@ pub trait NodeSource: Send + Sync {
     /// whatever toggle state it holds internally.
     async fn read_dir(&self, id: &[String]) -> io::Result<Vec<Entry>>;
 
+    /// Entry describing the root node itself (`id == []`). Used for the
+    /// initial column's display name and icon, since the root has no
+    /// parent entry that could otherwise supply that information — every
+    /// other column's title icon is looked up from the `Entry` in its
+    /// *parent* column that opened it (see `App::column_icon`), which
+    /// doesn't work for the root.
+    async fn root_entry(&self) -> Entry;
+
     /// Builds a styled, display-ready preview for the node at `id`. Returns
     /// `SanitizedText` rather than a raw `Text` so every implementation is
     /// forced through the escaping in [`crate::sanitize`] — see that

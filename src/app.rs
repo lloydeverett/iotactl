@@ -3,6 +3,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ratatui::style::Color;
 use ratatui::widgets::{ListState, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
@@ -50,10 +51,11 @@ pub struct App {
     /// has already made it stale.
     epoch: u64,
 
-    /// Display name for the root node (id == []), e.g. "iotactl", since it
-    /// has no path segment of its own to name it. Used as that column's
-    /// title.
-    root_label: String,
+    /// The root node (id == []) itself, obtained from the source via
+    /// `NodeSource::root_entry`. Since the root has no path segment of its
+    /// own, its `name` is used as the initial column's title, and its icon
+    /// fields as that column's title icon (see `column_icon`).
+    root_entry: Entry,
 
     /// Toggles supplied by the node source (e.g. "hidden" for a filesystem
     /// source), paired with their current values. The source is the sole
@@ -73,6 +75,10 @@ pub struct App {
     /// focused, hiding the column stack. Has no visible effect while the
     /// column stack is focused instead — see `draw_columns`.
     pub zoom_preview: bool,
+    /// Whether Nerd Font icons are drawn to the left of filenames (in
+    /// listings and window titles). Set once from the `--nerd-font` CLI
+    /// flag and never changed at runtime.
+    pub nerd_font: bool,
 
     /// Stack of opened directories, from the fixed start dir (index 0) down
     /// to the currently focused directory (last). Entering a directory
@@ -148,20 +154,22 @@ const PREVIEW_LOADING_DEBOUNCE: Duration = Duration::from_millis(80);
 impl App {
     pub async fn new(
         start: Vec<String>,
-        root_label: String,
         source: Arc<dyn NodeSource>,
         update_tx: mpsc::UnboundedSender<AppUpdate>,
+        nerd_font: bool,
     ) -> Self {
+        let root_entry = source.root_entry().await;
         let source_toggles = load_source_toggles(&source).await;
         let mut app = App {
             source,
             update_tx,
             epoch: 0,
-            root_label,
+            root_entry,
             source_toggles,
             wrap_preview: false,
             show_line_numbers: false,
             zoom_preview: false,
+            nerd_font,
             columns: Vec::new(),
             list_state: ListState::default(),
             preview: SanitizedText::default(),
@@ -292,8 +300,36 @@ impl App {
     pub fn path_label(&self, id: &[String]) -> String {
         match id.last() {
             Some(name) => name.clone(),
-            None => self.root_label.clone(),
+            None => self.root_entry.name.clone(),
         }
+    }
+
+    /// Nerd Font icon/color for the column at `idx`'s title, looked up from
+    /// the `Entry` that was selected in the *previous* column to open it —
+    /// since a `Column` only stores an `id`, not the `Entry` that produced
+    /// it. The root column (`idx == 0`) has no such parent, so its icon
+    /// comes from `root_entry` (obtained from the source itself) instead;
+    /// same fallback if the entry can no longer be found in a non-root
+    /// parent (e.g. it was removed by a concurrent change on disk).
+    pub fn column_icon(&self, idx: usize) -> (Option<char>, Option<Color>) {
+        let Some(parent) = idx.checked_sub(1).map(|i| &self.columns[i]) else {
+            return (self.root_entry.nerd_icon, self.root_entry.nerd_icon_color);
+        };
+        parent
+            .entries
+            .iter()
+            .find(|e| e.id == self.columns[idx].id)
+            .map(|e| (e.nerd_icon, e.nerd_icon_color))
+            .unwrap_or((None, None))
+    }
+
+    /// Nerd Font icon/color for the preview pane's title: the selected
+    /// entry's, or no icon when nothing is selected (the pane falls back to
+    /// showing `cwd()` as its title in that case, which isn't an `Entry`).
+    pub fn preview_title_icon(&self) -> (Option<char>, Option<Color>) {
+        self.selected_entry()
+            .map(|e| (e.nerd_icon, e.nerd_icon_color))
+            .unwrap_or((None, None))
     }
 
     /// Dispatches a background fetch of the preview for the currently
@@ -530,6 +566,22 @@ impl App {
         self.dispatch_preview_update_immediate();
     }
 
+    /// Abandons the deepest column after its `read_dir` came back unusable
+    /// (a real error, or — per `apply_update`'s `ColumnLoaded` handling — an
+    /// empty listing, which isn't worth opening as a column of its own).
+    /// Pops back to the parent, shows `message` as a toast, and — since
+    /// `enter()` cleared the preview immediately for the column being
+    /// abandoned (see `dispatch_preview_update_immediate`'s doc comment) —
+    /// redispatches it so the pane reflects the re-selected entry (e.g. an
+    /// "empty directory" placeholder) instead of staying blank.
+    fn fail_column_load(&mut self, message: String) {
+        self.columns.pop();
+        self.preview_focused = false;
+        self.sync_focused_list_state();
+        self.set_message(Some(message));
+        self.dispatch_preview_update_immediate();
+    }
+
     pub fn toggle_toggles_menu(&mut self) {
         self.toggles_menu_open = !self.toggles_menu_open;
     }
@@ -626,13 +678,7 @@ impl App {
                 }
                 match result {
                     Ok(entries) if entries.is_empty() => {
-                        self.columns.pop();
-                        self.preview_focused = false;
-                        self.sync_focused_list_state();
-                        self.set_message(Some(format!(
-                            "Directory is empty: /{}",
-                            id.join("/")
-                        )));
+                        self.fail_column_load(format!("Directory is empty: /{}", id.join("/")));
                     }
                     Ok(entries) => {
                         let selected = Some(self.resolve_selection(&id, &entries));
@@ -645,10 +691,7 @@ impl App {
                         self.dispatch_preview_update();
                     }
                     Err(e) => {
-                        self.columns.pop();
-                        self.preview_focused = false;
-                        self.sync_focused_list_state();
-                        self.set_message(Some(format!("Error reading /{}: {e}", id.join("/"))));
+                        self.fail_column_load(format!("Error reading /{}: {e}", id.join("/")));
                     }
                 }
             }

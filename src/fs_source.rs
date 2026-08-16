@@ -11,6 +11,7 @@ use ratatui::text::Line;
 
 use crate::command::Command;
 use crate::entry::Entry;
+use crate::entry_preview;
 use crate::highlight;
 use crate::node_source::NodeSource;
 use crate::sanitize::SanitizedText;
@@ -38,6 +39,93 @@ const RAW_TOGGLE_NAME: &str = "raw";
 /// permissions, timestamps, ...) instead of its normal contents (file text
 /// or directory listing). Off by default.
 const META_TOGGLE_NAME: &str = "meta";
+
+/// Nerd Font glyph for a folder (any directory, regardless of name). Has no
+/// fixed color of its own — see `entry_icon`.
+const FOLDER_ICON: char = '\u{f07b}';
+
+/// Nerd Font glyph/color for a file whose type isn't recognized by
+/// [`file_icon`]. Kept distinct from other icons so an unrecognized file
+/// still reads as "a file" rather than blending into some other color.
+const GENERIC_FILE_ICON: (char, Color) = ('\u{f15b}', Color::Gray);
+
+/// Picks a Nerd Font glyph/color for a file based on its name, falling back
+/// to [`GENERIC_FILE_ICON`] for anything not recognized. Codepoints are from
+/// the "seti"/"devicons" glyph sets bundled with Nerd Fonts (all in the BMP
+/// private-use area, so they render as a single terminal cell in a patched
+/// font). Matching is deliberately scoped to the languages this crate
+/// already syntax-highlights (see `highlight.rs`'s `Cargo.toml` deps) plus a
+/// handful of ubiquitous extras (git, lock files, docs, images, archives).
+/// Colors aren't chosen for any deep reason beyond giving different file
+/// types a visually distinct look.
+fn file_icon(name: &str) -> (char, Color) {
+    let lower = name.to_lowercase();
+
+    // Whole-filename matches take priority over extension matches, since
+    // e.g. "Dockerfile" and ".gitignore" have no (or a misleading) extension.
+    match lower.as_str() {
+        "dockerfile" => return ('\u{f21f}', Color::Rgb(56, 150, 220)),
+        "makefile" => return ('\u{f489}', Color::Gray),
+        ".gitignore" | ".gitattributes" | ".gitmodules" => {
+            return ('\u{f1d3}', Color::Rgb(230, 80, 60))
+        }
+        "cargo.lock" | "package-lock.json" | "yarn.lock" | "pnpm-lock.yaml" => {
+            return ('\u{f023}', Color::DarkGray)
+        }
+        _ => {}
+    }
+
+    let ext = match lower.rsplit_once('.') {
+        Some((_, ext)) => ext,
+        None => return GENERIC_FILE_ICON,
+    };
+
+    match ext {
+        "rs" => ('\u{e7a8}', Color::Rgb(222, 165, 132)),
+        "toml" => ('\u{e6b2}', Color::Rgb(156, 107, 46)),
+        "py" => ('\u{e73c}', Color::Yellow),
+        "js" | "mjs" | "cjs" => ('\u{e74e}', Color::Yellow),
+        "jsx" => ('\u{e7ba}', Color::Cyan),
+        "ts" => ('\u{e628}', Color::Blue),
+        "tsx" => ('\u{e7ba}', Color::Rgb(97, 175, 239)),
+        "json" => ('\u{e60b}', Color::Rgb(203, 180, 30)),
+        "yaml" | "yml" => ('\u{e615}', Color::Rgb(203, 75, 22)),
+        "html" | "htm" => ('\u{e736}', Color::Rgb(227, 79, 38)),
+        "css" => ('\u{e749}', Color::Rgb(86, 156, 214)),
+        "c" | "h" => ('\u{e61e}', Color::Rgb(85, 116, 205)),
+        "cpp" | "cc" | "cxx" | "hpp" => ('\u{e61d}', Color::Rgb(0, 89, 156)),
+        "go" => ('\u{e627}', Color::Rgb(0, 173, 216)),
+        "java" => ('\u{e738}', Color::Rgb(230, 80, 60)),
+        "lua" => ('\u{e620}', Color::Rgb(0, 111, 184)),
+        "rb" => ('\u{e739}', Color::Red),
+        "sh" | "bash" | "zsh" => ('\u{e795}', Color::Green),
+        "md" | "markdown" => ('\u{e73e}', Color::Rgb(220, 220, 220)),
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "bmp" | "webp" => {
+            ('\u{f1c5}', Color::Magenta)
+        }
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" => ('\u{f1c6}', Color::Rgb(205, 133, 63)),
+        "pdf" => ('\u{f1c1}', Color::Red),
+        "lock" => ('\u{f023}', Color::DarkGray),
+        _ => GENERIC_FILE_ICON,
+    }
+}
+
+/// Picks the Nerd Font glyph/color for an entry, per `fs_source`'s policy:
+/// files are looked up by name via [`file_icon`], falling back to
+/// [`GENERIC_FILE_ICON`] for anything unrecognized. Folders always get
+/// [`FOLDER_ICON`] but deliberately with no color opinion (`None`): the UI
+/// already has a fixed color for directory names (see
+/// `entry_preview::entry_label`), and falls back to that same color for an
+/// icon with none of its own, so the folder icon tracks it automatically
+/// instead of this module hardcoding a second, possibly-drifting choice.
+fn entry_icon(name: &str, is_dir: bool) -> (char, Option<Color>) {
+    if is_dir {
+        (FOLDER_ICON, None)
+    } else {
+        let (icon, color) = file_icon(name);
+        (icon, Some(color))
+    }
+}
 
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
@@ -74,15 +162,22 @@ pub struct FsSource {
     /// Same sharing rationale as `show_hidden`. Defaults to `false`: the
     /// preview shows content, not metadata.
     show_meta: Arc<AtomicBool>,
+    /// Whether directory previews (see `preview_tui_sync`) include Nerd
+    /// Font icons. Set once at construction from the `--nerd-font` CLI
+    /// flag — unlike the other fields here, it's not a user-facing toggle,
+    /// just a static rendering preference threaded down from `main`, so a
+    /// plain `bool` (rather than an `Arc<AtomicBool>`) is enough.
+    nerd_font: bool,
 }
 
 impl FsSource {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(root: PathBuf, nerd_font: bool) -> Self {
         FsSource {
             root,
             show_hidden: Arc::new(AtomicBool::new(false)),
             raw_markdown: Arc::new(AtomicBool::new(false)),
             show_meta: Arc::new(AtomicBool::new(false)),
+            nerd_font,
         }
     }
 
@@ -135,6 +230,8 @@ impl FsSource {
                 link_metadata.is_dir()
             };
 
+            let (icon, icon_color) = entry_icon(&name, is_dir);
+
             let mut child_id = id.to_vec();
             child_id.push(name.clone());
             entries.push(Entry {
@@ -143,6 +240,8 @@ impl FsSource {
                 is_dir,
                 is_link,
                 suggested_commands: suggested_commands.clone(),
+                nerd_icon: Some(icon),
+                nerd_icon_color: icon_color,
             });
         }
 
@@ -165,7 +264,7 @@ impl FsSource {
         }
         match fs::metadata(&path) {
             Ok(meta) if meta.is_dir() => match self.read_dir_sync(id) {
-                Ok(entries) => preview_dir(&entries),
+                Ok(entries) => entry_preview::format_dir_preview(&entries, self.nerd_font),
                 Err(e) => error_text(e.to_string()),
             },
             Ok(_) => preview_file(&path, !self.raw_markdown.load(Ordering::SeqCst)),
@@ -184,6 +283,23 @@ impl NodeSource for FsSource {
             .unwrap_or_else(|_| {
                 Err(io::Error::other("panicked while reading directory"))
             })
+    }
+
+    async fn root_entry(&self) -> Entry {
+        let name = self
+            .root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.root.display().to_string());
+        Entry {
+            name,
+            id: Vec::new(),
+            is_dir: true,
+            is_link: false,
+            suggested_commands: Arc::from(Vec::new()),
+            nerd_icon: Some(FOLDER_ICON),
+            nerd_icon_color: None,
+        }
     }
 
     async fn preview_tui(&self, id: &[String]) -> SanitizedText {
@@ -262,38 +378,6 @@ fn error_text(msg: String) -> SanitizedText {
 
 fn dim_text(msg: String) -> SanitizedText {
     SanitizedText::from_text(&msg, Style::default().fg(Color::DarkGray))
-}
-
-fn preview_dir(entries: &[Entry]) -> SanitizedText {
-    if entries.is_empty() {
-        return dim_text("empty directory".to_string());
-    }
-    // Each label is built via `SanitizedText::from_label`, so the collected
-    // lines are already free of raw control characters — entry names come
-    // straight from the filesystem and, unlike `/`, aren't restricted from
-    // containing them.
-    let lines = entries
-        .iter()
-        .map(|entry| {
-            let (label, style) = if entry.is_dir {
-                (
-                    format!("{}/", entry.name),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if entry.is_link {
-                (
-                    format!("{}@", entry.name),
-                    Style::default().fg(Color::Magenta),
-                )
-            } else {
-                (entry.name.clone(), Style::default())
-            };
-            SanitizedText::from_label(&label, style)
-        })
-        .collect();
-    SanitizedText::assume_sanitized(lines)
 }
 
 fn preview_file(path: &Path, hide_markers: bool) -> SanitizedText {

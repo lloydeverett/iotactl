@@ -19,4 +19,8 @@ assert_contains 'Directory is empty: /empty_dir'
 assert_contains 'bbb_dir/'
 assert_contains 'empty_dir/'
 
+# The preview pane should still show the "empty directory" placeholder for
+# the (still-selected) empty_dir, not be left blank by the failed enter().
+assert_contains 'empty directory'
+
 echo PASS
