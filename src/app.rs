@@ -170,23 +170,61 @@ const TOAST_DURATION: Duration = Duration::from_secs(2);
 const PREVIEW_LOADING_DEBOUNCE: Duration = Duration::from_millis(80);
 
 impl App {
+    /// `toggle_overrides` are `(name, value)` pairs applied in order right
+    /// after the source's toggles are loaded and before the initial listing
+    /// is fetched, so the first render already reflects them — e.g. an
+    /// overridden "hidden" toggle affects the very first `read_dir`. A name
+    /// that appears more than once (e.g. both `--toggle-on` and
+    /// `--toggle-off` for the same toggle, from the CLI and/or
+    /// `IOTACTL_FLAGS`) is resolved by whichever pair comes last, since each
+    /// is just applied in turn and the last write wins. This only seeds the
+    /// initial value; every toggle can still be flipped normally afterwards
+    /// from within the TUI. Matches against the ambient toggles ("wrap",
+    /// "numbers", "zoom") first, then whatever the source exposes.
     pub async fn new(
         start: Vec<String>,
         source: Arc<dyn NodeSource>,
         update_tx: mpsc::UnboundedSender<AppUpdate>,
         nerd_font: bool,
+        toggle_overrides: &[(String, bool)],
     ) -> Self {
         let root_entry = source.root_entry().await;
-        let source_toggles = load_source_toggles(&source).await;
+        let mut source_toggles = load_source_toggles(&source).await;
+        let mut wrap_preview = false;
+        let mut show_line_numbers = false;
+        let mut zoom_preview = false;
+
+        for (name, value) in toggle_overrides {
+            match name.as_str() {
+                "wrap" => wrap_preview = *value,
+                "numbers" => show_line_numbers = *value,
+                "zoom" => zoom_preview = *value,
+                _ => {
+                    let Some(idx) = source_toggles.iter().position(|(t, _)| &t.name == name)
+                    else {
+                        let mut valid = vec!["wrap".to_string(), "numbers".to_string(), "zoom".to_string()];
+                        valid.extend(source_toggles.iter().map(|(t, _)| t.name.clone()));
+                        eprintln!(
+                            "iotactl: unknown toggle {name:?} (valid toggles: {})",
+                            valid.join(", ")
+                        );
+                        std::process::exit(1);
+                    };
+                    source_toggles[idx].1 = *value;
+                    let _ = source.set_toggle(&source_toggles[idx].0, *value).await;
+                }
+            }
+        }
+
         let mut app = App {
             source,
             update_tx,
             epoch: 0,
             root_entry,
             source_toggles,
-            wrap_preview: false,
-            show_line_numbers: false,
-            zoom_preview: false,
+            wrap_preview,
+            show_line_numbers,
+            zoom_preview,
             nerd_font,
             columns: Vec::new(),
             preview: SanitizedText::default(),

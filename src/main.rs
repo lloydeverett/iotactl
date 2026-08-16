@@ -14,7 +14,7 @@ use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{ArgAction, CommandFactory, FromArgMatches, Parser};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -34,37 +34,168 @@ use fs_source::FsSource;
 const PAGE_SIZE: i32 = 10;
 const HALF_PAGE_SIZE: i32 = PAGE_SIZE / 2;
 
-/// Ranger-style TUI file browser.
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, args_override_self = true)]
 struct Cli {
     /// Directory to start browsing from. Defaults to the current directory.
     path: Option<PathBuf>,
 
     /// Show Nerd Font icons to the left of filenames, in listings and
     /// window titles. Requires a terminal font patched with Nerd Fonts.
-    #[arg(long)]
+    #[arg(long, action = ArgAction::SetTrue, overrides_with = "no_nerd_font")]
     nerd_font: bool,
 
-    /// Disable mouse support (click to select/open, scroll to navigate).
-    #[arg(long)]
+    /// Disable Nerd Font icons (default).
+    #[arg(long, action = ArgAction::SetTrue, overrides_with = "nerd_font")]
+    no_nerd_font: bool,
+
+    /// Enable mouse support: click to select/open, scroll to navigate (default).
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = true, overrides_with = "no_mouse")]
+    mouse: bool,
+
+    /// Disable mouse support.
+    #[arg(long, action = ArgAction::SetTrue, overrides_with = "mouse")]
     no_mouse: bool,
+
+    /// Set a toggle on at startup (repeatable). See the 't' toggles menu for
+    /// valid names.
+    #[arg(long = "toggle-on", value_name = "NAME")]
+    toggle_on: Vec<String>,
+
+    /// Set a toggle off at startup (repeatable). See --toggle-on.
+    #[arg(long = "toggle-off", value_name = "NAME")]
+    toggle_off: Vec<String>,
+}
+
+/// Arg ids (the derived `Cli` field names) allowed to be set via
+/// `IOTACTL_FLAGS`. A new arg is unsettable from the environment by default
+/// — add its id here only when that's deliberately wanted. `path` is
+/// deliberately never on this list: a positional smuggled in through the
+/// environment would otherwise let it silently redirect which directory
+/// gets opened.
+const ENV_ALLOWED_ARGS: &[&str] = &[
+    "nerd_font",
+    "no_nerd_font",
+    "mouse",
+    "no_mouse",
+    "toggle_on",
+    "toggle_off",
+];
+
+/// Shell-word-splits `IOTACTL_FLAGS`, if set and non-empty.
+fn env_flag_args() -> Option<Vec<String>> {
+    let raw = env::var("IOTACTL_FLAGS").ok().filter(|s| !s.trim().is_empty())?;
+    Some(shlex::split(&raw).unwrap_or_else(|| {
+        eprintln!("iotactl: failed to parse IOTACTL_FLAGS environment variable");
+        std::process::exit(1);
+    }))
+}
+
+/// Rejects `env_args` if they'd set anything outside [`ENV_ALLOWED_ARGS`].
+/// Parses them in isolation (as if they were the whole invocation) purely to
+/// see which arg ids they set — the real parse of the merged argv happens
+/// separately in `parse_cli`.
+fn check_env_args_allowed(env_args: &[String]) {
+    // `disable_help_flag`/`disable_version_flag` make `--help`/`--version`
+    // behave like any other unrecognized flag here (clap's usual "unexpected
+    // argument" error) instead of immediately printing and exiting — those
+    // aren't on `ENV_ALLOWED_ARGS` either, so they should be rejected the
+    // same way, not given a free pass just because clap injects them.
+    let cmd = Cli::command()
+        .disable_help_flag(true)
+        .disable_version_flag(true);
+    let known_ids: Vec<String> = cmd
+        .get_arguments()
+        .map(|a| a.get_id().as_str().to_string())
+        .collect();
+    let matches = cmd
+        .no_binary_name(true)
+        .try_get_matches_from(env_args)
+        .unwrap_or_else(|e| e.exit());
+    for id in &known_ids {
+        // `value_source` distinguishes an arg actually supplied on this
+        // (env-only) command line from one merely holding its default —
+        // `matches.ids()` includes both, which would otherwise flag e.g.
+        // `mouse`'s `default_value_t` as if the environment had set it.
+        if matches.value_source(id.as_str()) != Some(clap::parser::ValueSource::CommandLine) {
+            continue;
+        }
+        if !ENV_ALLOWED_ARGS.contains(&id.as_str()) {
+            let display = if id == "path" {
+                "the PATH argument".to_string()
+            } else {
+                format!("--{}", id.replace('_', "-"))
+            };
+            eprintln!("iotactl: IOTACTL_FLAGS may not set {display}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Builds the effective argv by splicing `IOTACTL_FLAGS` (shell-word split,
+/// and checked against [`ENV_ALLOWED_ARGS`]) in ahead of the real
+/// command-line arguments. Placing them first means an explicit
+/// command-line flag takes precedence over the same flag from the
+/// environment, since clap keeps the last occurrence of a given option.
+fn build_args() -> Vec<String> {
+    let mut argv: Vec<String> = env::args().collect();
+    let Some(env_args) = env_flag_args() else {
+        return argv;
+    };
+    check_env_args_allowed(&env_args);
+    let rest = argv.split_off(1);
+    argv.extend(env_args);
+    argv.extend(rest);
+    argv
+}
+
+/// Parses the effective argv (see [`build_args`]) into a [`Cli`], plus the
+/// `--toggle-on`/`--toggle-off` pairs in the order they actually appeared.
+/// `Cli`'s derived `Vec<String>` fields can't express that interleaving on
+/// their own (each only records occurrences of its own flag), so this goes
+/// through `ArgMatches::indices_of` — which assigns every value a position
+/// in the flat argument list — to recover it, rather than hand-rolling a
+/// second argument parser that would have to duplicate clap's `--flag=value`
+/// handling to stay in sync with it.
+fn parse_cli() -> (Cli, Vec<(String, bool)>) {
+    let matches = Cli::command().get_matches_from(build_args());
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    let mut overrides: Vec<(usize, String, bool)> = Vec::new();
+    if let (Some(indices), Some(values)) = (
+        matches.indices_of("toggle_on"),
+        matches.get_many::<String>("toggle_on"),
+    ) {
+        overrides.extend(indices.zip(values).map(|(i, v)| (i, v.clone(), true)));
+    }
+    if let (Some(indices), Some(values)) = (
+        matches.indices_of("toggle_off"),
+        matches.get_many::<String>("toggle_off"),
+    ) {
+        overrides.extend(indices.zip(values).map(|(i, v)| (i, v.clone(), false)));
+    }
+    overrides.sort_by_key(|(i, ..)| *i);
+
+    let toggle_overrides = overrides.into_iter().map(|(_, name, on)| (name, on)).collect();
+    (cli, toggle_overrides)
 }
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let cli = Cli::parse();
+    let (cli, toggle_overrides) = parse_cli();
 
     let start_dir = cli
         .path
         .unwrap_or_else(|| env::current_dir().expect("failed to get current directory"))
         .canonicalize()?;
 
+    let nerd_font = cli.nerd_font && !cli.no_nerd_font;
+    let mouse = cli.mouse && !cli.no_mouse;
+
     let (tx, rx) = mpsc::unbounded_channel::<AppUpdate>();
     let source: Arc<dyn node_source::NodeSource> =
-        Arc::new(FsSource::new(start_dir, cli.nerd_font));
-    let mouse = !cli.no_mouse;
-    let app = App::new(Vec::new(), source, tx, cli.nerd_font).await;
+        Arc::new(FsSource::new(start_dir, nerd_font));
+    let app = App::new(Vec::new(), source, tx, nerd_font, &toggle_overrides).await;
 
     let mut terminal = setup_terminal(mouse)?;
     let result = run(&mut terminal, app, rx).await;
