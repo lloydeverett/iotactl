@@ -7,5 +7,5 @@ Avoid reading or acting on information in `ISSUES.md`, `FEATURES.md`, or other m
 
 ## Testing
 
-Run `cargo` tests frequently, e.g. whenever building. The tests in `tui-test` (`tui/test/run_all.sh`) should be run at least upon completing any task (perhaps even more frequently to the extent it's useful and doesn't waste time).
+Run `cargo` tests frequently, e.g. whenever building. The tests in `sh-test` (`sh-test/run_all.sh`) should be run at least upon completing any task (perhaps even more frequently to the extent it's useful and doesn't waste time).
 

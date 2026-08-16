@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs every test_*.sh in this directory against a fresh cargo build and
-# prints a pass/fail summary. Usage: tui-test/run_all.sh
+# prints a pass/fail summary. Usage: sh-test/run_all.sh
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
