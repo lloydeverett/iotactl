@@ -474,6 +474,15 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 tree_sitter_md::INJECTION_QUERY_INLINE,
             ),
         );
+        m.insert(
+            "dockerfile",
+            build_config(
+                arborium_dockerfile::language(),
+                "dockerfile",
+                arborium_dockerfile::HIGHLIGHTS_QUERY,
+                arborium_dockerfile::INJECTIONS_QUERY,
+            ),
+        );
         m
     })
 }
@@ -498,18 +507,78 @@ fn language_for_extension(ext: &str) -> Option<&'static str> {
         "lua" => "lua",
         "rb" => "ruby",
         "md" | "markdown" => "markdown",
+        "dockerfile" => "dockerfile",
         _ => return None,
     })
 }
 
-/// Syntax-highlights `text` based on the language inferred from `path`'s
-/// extension. Returns `None` when the extension isn't recognized, so the
-/// caller can fall back to rendering plain text.
-pub fn highlight(path: &Path, text: &str) -> Option<Vec<Line<'static>>> {
-    let lang_name = path
+/// Maps well-known filenames (matched without regard to any extension logic)
+/// to a language. Checked before the extension-based lookup so a name like
+/// `Dockerfile` or `Dockerfile.dev` — which has no extension `language_for_extension`
+/// would recognize, or one it would misread as `dev` — still resolves.
+fn language_for_filename(name: &str) -> Option<&'static str> {
+    let stem = name.split('.').next().unwrap_or(name);
+    if stem.eq_ignore_ascii_case("dockerfile") || stem.eq_ignore_ascii_case("containerfile") {
+        return Some("dockerfile");
+    }
+    Some(match name {
+        "Cargo.lock" => "toml",
+        "Gemfile" | "Rakefile" | "Vagrantfile" => "ruby",
+        ".bashrc" | ".bash_profile" | ".bash_login" | ".profile" | ".zshrc" | ".zprofile"
+        | ".zshenv" | ".zlogin" | ".zlogout" => "bash",
+        _ => return None,
+    })
+}
+
+/// Maps a shebang line's interpreter (e.g. `#!/usr/bin/env python3` or
+/// `#!/bin/bash`) to a language, stripping any `env` wrapper and trailing
+/// version digits (`python3.11` -> `python`).
+fn language_for_shebang(text: &str) -> Option<&'static str> {
+    let first_line = text.lines().next()?;
+    let rest = first_line.strip_prefix("#!")?;
+    let mut parts = rest.split_whitespace();
+    let mut interpreter = parts.next()?.rsplit('/').next().unwrap_or("");
+    if interpreter == "env" {
+        interpreter = parts.next()?.rsplit('/').next().unwrap_or("");
+    }
+    let base = interpreter.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    Some(match base {
+        "python" => "python",
+        "sh" | "bash" | "dash" | "ksh" | "zsh" => "bash",
+        "node" | "nodejs" => "javascript",
+        "ruby" => "ruby",
+        "lua" => "lua",
+        _ => return None,
+    })
+}
+
+/// Resolves `path`/`text` to a registered language name, trying (in order of
+/// confidence) a well-known filename, then the extension, then — for
+/// extensionless files — a `#!` shebang line.
+fn language_for(path: &Path, text: &str) -> Option<&'static str> {
+    if let Some(lang) = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(language_for_filename)
+    {
+        return Some(lang);
+    }
+    if let Some(lang) = path
         .extension()
         .and_then(|ext| ext.to_str())
-        .and_then(language_for_extension)?;
+        .and_then(language_for_extension)
+    {
+        return Some(lang);
+    }
+    language_for_shebang(text)
+}
+
+/// Syntax-highlights `text` based on the language inferred from `path` (its
+/// filename, extension, or — for extensionless files — a `#!` shebang line
+/// in `text`). Returns `None` when nothing is recognized, so the caller can
+/// fall back to rendering plain text.
+pub fn highlight(path: &Path, text: &str) -> Option<Vec<Line<'static>>> {
+    let lang_name = language_for(path, text)?;
     let config = registry().get(lang_name).expect("registered above");
 
     let mut highlighter = Highlighter::new();
@@ -751,6 +820,110 @@ mod tests {
     fn unrecognized_extension_returns_none() {
         let path = Path::new("sample.this-extension-does-not-exist");
         assert!(highlight(path, "hello\n").is_none());
+    }
+
+    #[test]
+    fn dockerfile_is_recognized_by_bare_filename() {
+        let path = Path::new("Dockerfile");
+        let text = "FROM ubuntu:22.04\nRUN echo hi\n";
+        let lines = highlight(path, text).unwrap();
+        let styled_texts: Vec<(&str, Style)> = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| (s.content.as_ref(), s.style))
+            .collect();
+
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "FROM" && s.fg == Some(Color::Magenta)),
+            "expected `FROM` highlighted as a keyword, got {styled_texts:?}"
+        );
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "RUN" && s.fg == Some(Color::Magenta)),
+            "expected `RUN` highlighted as a keyword, got {styled_texts:?}"
+        );
+    }
+
+    #[test]
+    fn dockerfile_suffixed_variant_is_recognized() {
+        let path = Path::new("Dockerfile.dev");
+        let text = "FROM scratch\n";
+        assert!(highlight(path, text).is_some());
+    }
+
+    #[test]
+    fn cargo_lock_is_highlighted_as_toml() {
+        let path = Path::new("Cargo.lock");
+        let text = "# This file is automatically generated by Cargo.\nversion = 4\n\n[[package]]\nname = \"iotactl\"\n";
+        let lines = highlight(path, text).unwrap();
+        let styled_texts: Vec<(&str, Style)> = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| (s.content.as_ref(), s.style))
+            .collect();
+
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "\"iotactl\"" && s.fg == Some(Color::Green)),
+            "expected string value highlighted, got {styled_texts:?}"
+        );
+    }
+
+    #[test]
+    fn shebang_detects_python_for_extensionless_file() {
+        let path = Path::new("myscript");
+        let text = "#!/usr/bin/env python3\ndef foo():\n    return 1\n";
+        let lines = highlight(path, text).unwrap();
+        let styled_texts: Vec<(&str, Style)> = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| (s.content.as_ref(), s.style))
+            .collect();
+
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "def" && s.fg == Some(Color::Magenta)),
+            "expected `def` highlighted as a keyword, got {styled_texts:?}"
+        );
+    }
+
+    #[test]
+    fn shebang_detects_bash_without_env_wrapper() {
+        let path = Path::new("myscript");
+        let text = "#!/bin/bash\necho hi\n";
+        assert!(highlight(path, text).is_some());
+    }
+
+    #[test]
+    fn extension_takes_priority_over_shebang() {
+        // A `.py` file whose shebang points at a shell should still be
+        // highlighted as Python, since the extension is the stronger signal.
+        let path = Path::new("script.py");
+        let text = "#!/bin/sh\ndef foo():\n    return 1\n";
+        let lines = highlight(path, text).unwrap();
+        let styled_texts: Vec<(&str, Style)> = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| (s.content.as_ref(), s.style))
+            .collect();
+
+        assert!(
+            styled_texts
+                .iter()
+                .any(|(t, s)| *t == "def" && s.fg == Some(Color::Magenta)),
+            "expected `def` highlighted as a keyword (Python won over shebang's `sh`), got {styled_texts:?}"
+        );
+    }
+
+    #[test]
+    fn no_shebang_and_no_extension_returns_none() {
+        let path = Path::new("myscript");
+        assert!(highlight(path, "just some text\n").is_none());
     }
 
     #[test]
