@@ -25,11 +25,11 @@ const HIDDEN_TOGGLE_NAME: &str = "hidden";
 
 /// Name of the toggle, exposed via `available_toggles`, that controls
 /// whether markdown formatting characters (`#`, ```` ``` ````, `*`, ...) are
-/// hidden from previews. On while off, the underlying syntax highlighting
-/// (e.g. headings/emphasis/code spans still being colored) is unaffected —
-/// see `highlight::highlight`'s `hide_markers` parameter, which this toggle
-/// drives directly.
-const RENDER_TOGGLE_NAME: &str = "render";
+/// shown as-is in previews (on) or hidden (off, the default). The underlying
+/// syntax highlighting (e.g. headings/emphasis/code spans still being
+/// colored) is unaffected either way — see `highlight::highlight`'s
+/// `hide_markers` parameter, which is simply this toggle's negation.
+const RAW_TOGGLE_NAME: &str = "raw";
 
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
@@ -60,9 +60,9 @@ pub struct FsSource {
     /// root sees the same toggle state, since `read_dir`/`preview_tui` clone
     /// `self` into a blocking task on every call.
     show_hidden: Arc<AtomicBool>,
-    /// Same sharing rationale as `show_hidden`. Defaults to `true`: render
-    /// mode is the normal way to view markdown.
-    render_markdown: Arc<AtomicBool>,
+    /// Same sharing rationale as `show_hidden`. Defaults to `false`: markdown
+    /// markers are hidden (i.e. "rendered") by default.
+    raw_markdown: Arc<AtomicBool>,
 }
 
 impl FsSource {
@@ -70,7 +70,7 @@ impl FsSource {
         FsSource {
             root,
             show_hidden: Arc::new(AtomicBool::new(false)),
-            render_markdown: Arc::new(AtomicBool::new(true)),
+            raw_markdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -153,7 +153,7 @@ impl FsSource {
                 Ok(entries) => preview_dir(&entries),
                 Err(e) => error_text(e.to_string()),
             },
-            Ok(_) => preview_file(&path, self.render_markdown.load(Ordering::SeqCst)),
+            Ok(_) => preview_file(&path, !self.raw_markdown.load(Ordering::SeqCst)),
             Err(e) => error_text(e.to_string()),
         }
     }
@@ -190,7 +190,7 @@ impl NodeSource for FsSource {
                 key: 'H',
             },
             Toggle {
-                name: RENDER_TOGGLE_NAME.to_string(),
+                name: RAW_TOGGLE_NAME.to_string(),
                 key: 'r',
             },
         ])
@@ -200,8 +200,8 @@ impl NodeSource for FsSource {
         if toggle.name == HIDDEN_TOGGLE_NAME {
             self.show_hidden.store(value, Ordering::SeqCst);
             Ok(())
-        } else if toggle.name == RENDER_TOGGLE_NAME {
-            self.render_markdown.store(value, Ordering::SeqCst);
+        } else if toggle.name == RAW_TOGGLE_NAME {
+            self.raw_markdown.store(value, Ordering::SeqCst);
             Ok(())
         } else {
             Err(io::Error::new(
@@ -214,8 +214,8 @@ impl NodeSource for FsSource {
     async fn get_toggle(&self, toggle: &Toggle) -> io::Result<bool> {
         if toggle.name == HIDDEN_TOGGLE_NAME {
             Ok(self.show_hidden.load(Ordering::SeqCst))
-        } else if toggle.name == RENDER_TOGGLE_NAME {
-            Ok(self.render_markdown.load(Ordering::SeqCst))
+        } else if toggle.name == RAW_TOGGLE_NAME {
+            Ok(self.raw_markdown.load(Ordering::SeqCst))
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,

@@ -50,13 +50,14 @@ const RECOGNIZED_NAMES: &[&str] = &[
     "text.emphasis",
     "text.strong",
     "punctuation.special",
+    "punctuation.marker",
 ];
 
 fn style_for(name: &str) -> Option<Style> {
     let color = match name {
         "keyword" => Color::Magenta,
         "string" | "string.special" | "escape" => Color::Green,
-        "comment" | "punctuation.special" => Color::DarkGray,
+        "comment" | "punctuation.special" | "punctuation.marker" => Color::DarkGray,
         "number" | "boolean" | "attribute" => Color::Yellow,
         "type" | "type.builtin" | "constructor" | "tag" => Color::Cyan,
         "function" | "function.builtin" | "function.macro" | "module" => Color::Blue,
@@ -172,7 +173,11 @@ const MARKDOWN_BLOCK_INJECTIONS_QUERY: &str = r#"
 /// The delimiter/info_string pair is tagged `@punctuation.special` (not
 /// `@text.literal`) so `highlight()`'s `hide_markers` mode — see that
 /// function's doc comment — hides the whole ` ```json `/` ``` ` line, same
-/// as it hides `#` heading markers and list bullets.
+/// as it hides `#` heading markers. List markers are tagged the *separate*
+/// `@punctuation.marker` instead — dimmed the same way, but never hidden,
+/// since unlike a `#` or a fence line, a list bullet is the only thing on
+/// screen that says "this is a list item" and dropping it would erase
+/// structure rather than decoration.
 /// `(indented_code_block)` keeps `@text.literal` outright: it has no
 /// language info, so it's never a target of an injection either, and it has
 /// no delimiter of its own to hide.
@@ -235,6 +240,9 @@ const MARKDOWN_BLOCK_HIGHLIGHTS_QUERY: &str = r#"
   (list_marker_star)
   (list_marker_dot)
   (list_marker_parenthesis)
+] @punctuation.marker
+
+[
   (thematic_break)
   (fenced_code_block_delimiter)
   (info_string)
@@ -651,19 +659,22 @@ fn language_for(path: &Path, text: &str) -> Option<&'static str> {
 ///
 /// `hide_markers` drives markdown "render" mode: when set, every span
 /// captured as `@punctuation.special` — the markdown-only capture name used
-/// for formatting decoration such as `#` heading markers, list bullets,
-/// blockquote markers, ` ``` `/info-string fence lines, and `*`/`**`/`` ` ``
-/// emphasis and code-span delimiters (see `MARKDOWN_BLOCK_HIGHLIGHTS_QUERY`
-/// and `MARKDOWN_INLINE_HIGHLIGHTS_QUERY`) — is dropped from the output
-/// instead of rendered, while everything else (including syntax highlighting
-/// driven by the presence of those characters, e.g. a heading's color or
-/// emphasis's italics) is computed exactly as it would be with the markers
-/// shown. Has no effect on non-markdown languages, since none of them
-/// produce a `@punctuation.special` capture. A plain, uncaptured whitespace
-/// run immediately following a hidden marker on the same line — e.g. the
-/// space between an ATX `#` marker and its heading text, which the grammar
-/// leaves outside of any node — is swallowed too, so hiding a marker never
-/// leaves a dangling leading gap.
+/// for pure formatting decoration such as `#` heading markers, blockquote
+/// markers, ` ``` `/info-string fence lines, and `*`/`**`/`` ` `` emphasis
+/// and code-span delimiters (see `MARKDOWN_BLOCK_HIGHLIGHTS_QUERY` and
+/// `MARKDOWN_INLINE_HIGHLIGHTS_QUERY`) — is dropped from the output instead
+/// of rendered, while everything else (including syntax highlighting driven
+/// by the presence of those characters, e.g. a heading's color or emphasis's
+/// italics) is computed exactly as it would be with the markers shown.
+/// List markers are deliberately exempt: they're tagged the separate
+/// `@punctuation.marker` and always render, since — unlike the above — they
+/// carry structure (there's nothing else on screen marking a line as a list
+/// item) rather than pure decoration. Has no effect on non-markdown
+/// languages, since none of them produce a `@punctuation.special` capture. A
+/// plain, uncaptured whitespace run immediately following a hidden marker on
+/// the same line — e.g. the space between an ATX `#` marker and its heading
+/// text, which the grammar leaves outside of any node — is swallowed too, so
+/// hiding a marker never leaves a dangling leading gap.
 pub fn highlight(path: &Path, text: &str, hide_markers: bool) -> Option<Vec<Line<'static>>> {
     let lang_name = language_for(path, text)?;
     let config = registry().get(lang_name).expect("registered above");
@@ -695,12 +706,11 @@ pub fn highlight(path: &Path, text: &str, hide_markers: bool) -> Option<Vec<Line
                 if swallow_leading_space && name.is_none() {
                     region = region.trim_start_matches(' ');
                 }
-                // Only an ATX heading marker (`#` through `######`, and
-                // nothing else markdown ever tags `@punctuation.special`)
-                // leaves a plain, uncaptured gap before the next node — list
-                // markers and blockquote markers fold their trailing space
-                // into the marker node itself, and every other marker type
-                // (fence delimiters, emphasis/code-span delimiters, ...) sits
+                // Only an ATX heading marker (`#` through `######`) leaves a
+                // plain, uncaptured gap before the next node — a blockquote
+                // marker folds its trailing space into the marker node
+                // itself, and every other hideable marker type (fence
+                // delimiters, emphasis/code-span delimiters, ...) sits
                 // directly against its neighboring content. So swallowing
                 // must key off the marker's own text, not just "was hidden",
                 // or hiding e.g. a closing `*` would eat the real space that
@@ -1255,14 +1265,28 @@ mod tests {
     }
 
     #[test]
-    fn hide_markers_strips_list_and_blockquote_markers() {
+    fn hide_markers_strips_blockquote_marker_but_keeps_list_marker() {
+        // List bullets carry structure (nothing else on screen says "this
+        // is a list item"), so hide_markers exempts them — unlike a
+        // blockquote marker, which is pure decoration and still gets hidden.
         let path = Path::new("sample.md");
         let text = "- item one\n> quoted\n";
         let lines = highlight(path, text, true).unwrap();
         let line0: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         let line1: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(line0, "item one");
+        assert_eq!(line0, "- item one");
         assert_eq!(line1, "quoted");
+        let marker_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "- ")
+            .expect("list marker span");
+        assert_eq!(
+            marker_span.style.fg,
+            Some(Color::DarkGray),
+            "expected the list marker to still be dimmed, got {:?}",
+            marker_span.style
+        );
     }
 
     #[test]

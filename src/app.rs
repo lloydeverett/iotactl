@@ -94,6 +94,13 @@ pub struct App {
     /// opened as a new column instead.
     pub preview_focused: bool,
     pub preview_scroll: u16,
+    /// Set by `dispatch_preview_update_preserving_scroll` just before
+    /// dispatch, as `preview_scroll`'s fraction of the *old* preview's max
+    /// scroll. Consumed by `apply_update` once the new preview arrives to
+    /// re-derive `preview_scroll` as that same fraction of the *new*
+    /// preview's max scroll — since a toggle like "raw" can change the
+    /// line count, the same absolute offset would land somewhere else.
+    preview_scroll_restore_percent: Option<f64>,
     /// Height of the preview pane's content area (inside its border), as
     /// measured by the last render. Used to clamp/compute scroll offsets.
     pub preview_viewport_height: u16,
@@ -162,6 +169,7 @@ impl App {
             preview_loading_since: None,
             preview_focused: false,
             preview_scroll: 0,
+            preview_scroll_restore_percent: None,
             preview_viewport_height: 0,
             preview_viewport_width: 0,
             cursor_memory: HashMap::new(),
@@ -301,22 +309,45 @@ impl App {
     /// preview would itself be a wrong-content flash; callers there should
     /// use `dispatch_preview_update_immediate` instead.
     fn dispatch_preview_update(&mut self) {
-        self.dispatch_preview_update_inner(true);
+        self.dispatch_preview_update_inner(true, false);
     }
 
     /// Like `dispatch_preview_update`, but skips the debounce so the loading
     /// placeholder (or the new preview, if the fetch is fast) appears right
     /// away instead of holding over the previous preview.
     fn dispatch_preview_update_immediate(&mut self) {
-        self.dispatch_preview_update_inner(false);
+        self.dispatch_preview_update_inner(false, false);
     }
 
-    fn dispatch_preview_update_inner(&mut self, debounce: bool) {
-        self.preview_scroll = 0;
+    /// Like `dispatch_preview_update`, but for refetching the preview of the
+    /// entry that's *already* selected — e.g. after a source toggle changed
+    /// (see `toggle_source_toggle`) — rather than a new selection. Captures
+    /// the current scroll position as a fraction of the current preview's
+    /// max scroll, so `apply_update` can restore the same fraction once the
+    /// new preview (which may have a different line count, e.g. "raw" mode
+    /// showing/hiding markdown markers) arrives, instead of snapping to the
+    /// top. Only meaningful when the selected node itself hasn't changed —
+    /// callers should fall back to `dispatch_preview_update` otherwise.
+    fn dispatch_preview_update_preserving_scroll(&mut self) {
+        let max_scroll = self.preview_max_scroll();
+        self.preview_scroll_restore_percent = Some(if max_scroll == 0 {
+            0.0
+        } else {
+            (self.preview_scroll as f64 / max_scroll as f64).clamp(0.0, 1.0)
+        });
+        self.dispatch_preview_update_inner(true, true);
+    }
+
+    fn dispatch_preview_update_inner(&mut self, debounce: bool, preserve_scroll: bool) {
+        if !preserve_scroll {
+            self.preview_scroll = 0;
+            self.preview_scroll_restore_percent = None;
+        }
         let Some(id) = self.selected_entry().map(|entry| entry.id.clone()) else {
             self.preview = SanitizedText::default();
             self.preview_loading = false;
             self.preview_loading_since = None;
+            self.preview_scroll_restore_percent = None;
             return;
         };
 
@@ -577,6 +608,11 @@ impl App {
                 self.preview = text;
                 self.preview_loading = false;
                 self.preview_loading_since = None;
+                if let Some(percent) = self.preview_scroll_restore_percent.take() {
+                    let max_scroll = self.preview_max_scroll();
+                    self.preview_scroll = (percent * max_scroll as f64).round() as u16;
+                    self.preview_scroll = self.preview_scroll.min(max_scroll);
+                }
             }
             AppUpdate::ColumnLoaded { epoch, id, result } => {
                 if epoch != self.epoch {
@@ -620,7 +656,7 @@ impl App {
                 // toggling hidden files while the cursor sits on an
                 // always-visible one. The preview itself is always refetched
                 // below regardless: a source toggle is a black box from
-                // here, and one like "render" changes `preview_tui`'s output
+                // here, and one like "raw" changes `preview_tui`'s output
                 // for the very entry that's still selected, so the fetch
                 // can't be skipped just because the selection didn't move.
                 let previous_selection = self.selected_entry().map(|e| e.id.clone());
@@ -640,10 +676,15 @@ impl App {
 
                 let same_selection =
                     self.selected_entry().map(|e| &e.id) == previous_selection.as_ref();
-                if !same_selection {
+                if same_selection {
+                    // Same node, so keep the scroll position — as a
+                    // fraction of the (possibly now-different) content
+                    // length — rather than snapping back to the top.
+                    self.dispatch_preview_update_preserving_scroll();
+                } else {
                     self.preview_focused = false;
+                    self.dispatch_preview_update();
                 }
-                self.dispatch_preview_update();
             }
         }
     }
