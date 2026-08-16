@@ -291,7 +291,7 @@ impl FsSource {
                 },
                 Err(e) => Preview::new(error_text(e.to_string())),
             },
-            Ok(_) => Preview::new(preview_file(&path, !self.raw_markdown.load(Ordering::SeqCst))),
+            Ok(_) => preview_file(&path, !self.raw_markdown.load(Ordering::SeqCst)),
             Err(e) => Preview::new(error_text(e.to_string())),
         }
     }
@@ -407,10 +407,10 @@ fn dim_text(msg: String) -> SanitizedText {
     SanitizedText::from_text(&msg, Style::default().fg(Color::DarkGray))
 }
 
-fn preview_file(path: &Path, hide_markers: bool) -> SanitizedText {
+fn preview_file(path: &Path, hide_markers: bool) -> Preview {
     let mut file = match fs::File::open(path) {
         Ok(f) => f,
-        Err(e) => return error_text(e.to_string()),
+        Err(e) => return Preview::new(error_text(e.to_string())),
     };
 
     let total_size = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -418,28 +418,35 @@ fn preview_file(path: &Path, hide_markers: bool) -> SanitizedText {
     let mut buf = vec![0u8; PREVIEW_READ_LIMIT];
     let n = match file.read(&mut buf) {
         Ok(n) => n,
-        Err(e) => return error_text(e.to_string()),
+        Err(e) => return Preview::new(error_text(e.to_string())),
     };
     buf.truncate(n);
 
     if buf.is_empty() {
-        return SanitizedText::default();
+        return Preview::new(SanitizedText::default());
     }
     if buf.contains(&0) {
-        return dim_text(format!("binary file, {}", human_size(total_size)));
+        return Preview {
+            text: dim_text(format!("binary file, {}", human_size(total_size))),
+            override_disable_line_numbers: true,
+        };
     }
     match String::from_utf8(buf) {
         Ok(text) => {
             let sanitized = SanitizedText::from_text(&text, Style::default());
-            match highlight::highlight(path, &sanitized.plain(), hide_markers) {
+            let text = match highlight::highlight(path, &sanitized.plain(), hide_markers) {
                 // Safe: the highlighter only re-slices and re-styles the
                 // already-sanitized plain text handed to it above, so it
                 // can't introduce a raw control character of its own.
                 Some(lines) => SanitizedText::assume_sanitized(lines),
                 None => sanitized,
-            }
+            };
+            Preview::new(text)
         }
-        Err(_) => dim_text(format!("binary file, {}", human_size(total_size))),
+        Err(_) => Preview {
+            text: dim_text(format!("binary file, {}", human_size(total_size))),
+            override_disable_line_numbers: true,
+        },
     }
 }
 
