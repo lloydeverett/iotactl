@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
 use crate::app::App;
 use crate::entry::Entry;
@@ -16,17 +16,173 @@ const PREVIEW_MIN_WIDTH: u16 = 24;
 const PREVIEW_FOCUSED_MIN_WIDTH: u16 = 80;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let width = f.area().width;
-    let footer = footer_text(app, width);
+    let footer = footer_text(app, f.area().width);
     let footer_height = footer.lines.len().max(1) as u16;
+    let (body, footer_rect) = root_layout(f.area(), footer_height);
 
-    let root = Layout::default()
+    draw_columns(f, body, app);
+    f.render_widget(Paragraph::new(footer), footer_rect);
+}
+
+/// Splits the full terminal area into the body (columns + preview) and the
+/// footer, given the footer's already-computed height. The one place this
+/// split happens, so `draw` and the mouse hit-testing below always agree on
+/// where the body ends and the footer begins.
+fn root_layout(term_area: Rect, footer_height: u16) -> (Rect, Rect) {
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(footer_height)])
-        .split(f.area());
+        .split(term_area);
+    (chunks[0], chunks[1])
+}
 
-    draw_columns(f, root[0], app);
-    f.render_widget(Paragraph::new(footer), root[1]);
+/// Recomputes just the body `Rect` (the part `root_layout` calls `chunks[0]`)
+/// for a terminal of `term_area`, for use by mouse hit-testing outside of a
+/// render pass.
+fn body_area(term_area: Rect, app: &App) -> Rect {
+    let footer = footer_text(app, term_area.width);
+    let footer_height = footer.lines.len().max(1) as u16;
+    root_layout(term_area, footer_height).0
+}
+
+fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
+/// What a left-click landed on, as resolved by `hit_test`.
+pub enum MouseTarget {
+    /// A row in `app.columns[col_idx]` at `row_idx`.
+    Entry { col_idx: usize, row_idx: usize },
+    /// Inside `app.columns[col_idx]`'s box (its border/title, or blank
+    /// space past the last entry) but not on any particular row. Only
+    /// produced for a column other than the focused one — see `hit_test`.
+    Column { col_idx: usize },
+    /// Anywhere in the preview pane.
+    Preview,
+}
+
+/// Resolves a click at terminal coordinates `(x, y)` to whatever it landed
+/// on, using exactly the same layout math `draw` used to put things there
+/// (see `column_layout`) rather than tracking `Rect`s left over from the
+/// last render.
+pub fn hit_test(term_area: Rect, app: &App, x: u16, y: u16) -> Option<MouseTarget> {
+    let body = body_area(term_area, app);
+    if !rect_contains(body, x, y) {
+        return None;
+    }
+    if app.preview_focused && app.zoom_preview {
+        return Some(MouseTarget::Preview);
+    }
+
+    let layout = column_layout(body, app);
+    let last_col_idx = app.columns.len() - 1;
+    for (col_idx, rect) in layout.columns {
+        if rect_contains(rect, x, y) {
+            if let Some(target) = hit_entry(app, col_idx, rect, y) {
+                return Some(target);
+            }
+            // Missed the item hitbox. For any column other than the
+            // focused one, still move focus there — clicking a non-focused
+            // column's border/title or its blank space below the last
+            // entry is a reasonable way to jump to it without aiming for a
+            // specific row.
+            let is_focused = col_idx == last_col_idx && !app.preview_focused;
+            return (!is_focused).then_some(MouseTarget::Column { col_idx });
+        }
+    }
+    rect_contains(layout.preview, x, y).then_some(MouseTarget::Preview)
+}
+
+/// Whether `(x, y)` falls within the preview pane, for scroll-wheel routing
+/// (which doesn't need to know *what* was hit, just whether it should scroll
+/// the preview vs. the focused column).
+pub fn point_in_preview(term_area: Rect, app: &App, x: u16, y: u16) -> bool {
+    let body = body_area(term_area, app);
+    if app.preview_focused && app.zoom_preview {
+        return rect_contains(body, x, y);
+    }
+    rect_contains(column_layout(body, app).preview, x, y)
+}
+
+/// Maps a click at row `y` inside a column's bordered box (`rect`) to an
+/// entry index, using that column's list state — persisted across frames
+/// (see `Column::list_state`) so its `offset()` matches what was actually
+/// last drawn. Returns `None` for a click on the border/title, or past the
+/// last entry (e.g. in the blank space below a short list).
+fn hit_entry(app: &App, col_idx: usize, rect: Rect, y: u16) -> Option<MouseTarget> {
+    let column = &app.columns[col_idx];
+    if column.loading {
+        return None;
+    }
+    if y <= rect.y || y >= rect.y + rect.height.saturating_sub(1) {
+        return None;
+    }
+    let row_in_view = (y - rect.y - 1) as usize;
+    let row_idx = row_in_view + column.list_state.offset();
+    if row_idx >= column.entries.len() {
+        return None;
+    }
+    Some(MouseTarget::Entry { col_idx, row_idx })
+}
+
+/// The `Rect`s `draw_columns` renders into: each visible column tagged with
+/// its real index into `app.columns`, plus the trailing preview pane. Split
+/// out from `draw_columns` so mouse hit-testing can compute the exact same
+/// layout without a render pass.
+struct ColumnLayout {
+    columns: Vec<(usize, Rect)>,
+    preview: Rect,
+}
+
+fn column_layout(area: Rect, app: &App) -> ColumnLayout {
+    let total = app.columns.len();
+
+    // The last column is always visible; it's the focused one unless focus
+    // has moved to the preview pane.
+    let last_column_width = if app.preview_focused {
+        COLUMN_WIDTH
+    } else {
+        FOCUSED_COLUMN_WIDTH
+    };
+
+    let preview_min_width = if app.preview_focused {
+        PREVIEW_FOCUSED_MIN_WIDTH
+    } else {
+        PREVIEW_MIN_WIDTH
+    };
+    let preview_width = preview_min_width.min(area.width);
+    let available_for_columns = area.width.saturating_sub(preview_width);
+    let mut remaining = available_for_columns.saturating_sub(last_column_width);
+    let mut visible = 1usize.min(total);
+    while visible < total && remaining >= COLUMN_WIDTH {
+        remaining -= COLUMN_WIDTH;
+        visible += 1;
+    }
+    let start_idx = total - visible;
+
+    let mut constraints: Vec<Constraint> = Vec::with_capacity(visible + 1);
+    for offset in 0..visible {
+        let col_idx = start_idx + offset;
+        let width = if col_idx == total - 1 {
+            last_column_width
+        } else {
+            COLUMN_WIDTH
+        };
+        constraints.push(Constraint::Length(width));
+    }
+    constraints.push(Constraint::Min(preview_width));
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(constraints)
+        .split(area);
+
+    let columns = (0..visible)
+        .map(|offset| (start_idx + offset, chunks[offset]))
+        .collect();
+    ColumnLayout {
+        columns,
+        preview: chunks[visible],
+    }
 }
 
 /// Border/title style for a box, depending on whether it holds the
@@ -83,48 +239,9 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let total = app.columns.len();
+    let layout = column_layout(area, app);
 
-    // The last column is always visible; it's the focused one unless focus
-    // has moved to the preview pane.
-    let last_column_width = if app.preview_focused {
-        COLUMN_WIDTH
-    } else {
-        FOCUSED_COLUMN_WIDTH
-    };
-
-    let preview_min_width = if app.preview_focused {
-        PREVIEW_FOCUSED_MIN_WIDTH
-    } else {
-        PREVIEW_MIN_WIDTH
-    };
-    let preview_width = preview_min_width.min(area.width);
-    let available_for_columns = area.width.saturating_sub(preview_width);
-    let mut remaining = available_for_columns.saturating_sub(last_column_width);
-    let mut visible = 1usize.min(total);
-    while visible < total && remaining >= COLUMN_WIDTH {
-        remaining -= COLUMN_WIDTH;
-        visible += 1;
-    }
-    let start_idx = total - visible;
-
-    let mut constraints: Vec<Constraint> = Vec::with_capacity(visible + 1);
-    for offset in 0..visible {
-        let col_idx = start_idx + offset;
-        let width = if col_idx == total - 1 {
-            last_column_width
-        } else {
-            COLUMN_WIDTH
-        };
-        constraints.push(Constraint::Length(width));
-    }
-    constraints.push(Constraint::Min(preview_width));
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(constraints)
-        .split(area);
-
-    for offset in 0..visible {
-        let col_idx = start_idx + offset;
+    for (col_idx, rect) in layout.columns {
         let is_focused = col_idx == total - 1 && !app.preview_focused;
         let column = &app.columns[col_idx];
 
@@ -141,7 +258,7 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
                 Style::default().fg(Color::DarkGray),
             ))
             .block(block);
-            f.render_widget(para, chunks[offset]);
+            f.render_widget(para, rect);
             continue;
         }
 
@@ -181,17 +298,12 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
         };
         let list = List::new(items).block(block).highlight_style(highlight);
 
-        if is_focused {
-            app.list_state.select(selected);
-            f.render_stateful_widget(list, chunks[offset], &mut app.list_state);
-        } else {
-            let mut state = ListState::default();
-            state.select(selected);
-            f.render_stateful_widget(list, chunks[offset], &mut state);
-        }
+        let col = &mut app.columns[col_idx];
+        col.list_state.select(selected);
+        f.render_stateful_widget(list, rect, &mut col.list_state);
     }
 
-    draw_preview_column(f, chunks[visible], app);
+    draw_preview_column(f, layout.preview, app);
 }
 
 fn draw_preview_column(f: &mut Frame, area: Rect, app: &mut App) {

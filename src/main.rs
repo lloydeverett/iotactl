@@ -15,7 +15,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -42,6 +45,10 @@ struct Cli {
     /// window titles. Requires a terminal font patched with Nerd Fonts.
     #[arg(long)]
     nerd_font: bool,
+
+    /// Disable mouse support (click to select/open, scroll to navigate).
+    #[arg(long)]
+    no_mouse: bool,
 }
 
 #[tokio::main]
@@ -56,23 +63,30 @@ async fn main() -> io::Result<()> {
     let (tx, rx) = mpsc::unbounded_channel::<AppUpdate>();
     let source: Arc<dyn node_source::NodeSource> =
         Arc::new(FsSource::new(start_dir, cli.nerd_font));
+    let mouse = !cli.no_mouse;
     let app = App::new(Vec::new(), source, tx, cli.nerd_font).await;
 
-    let mut terminal = setup_terminal()?;
+    let mut terminal = setup_terminal(mouse)?;
     let result = run(&mut terminal, app, rx).await;
-    restore_terminal(&mut terminal)?;
+    restore_terminal(&mut terminal, mouse)?;
     result
 }
 
-fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
+fn setup_terminal(mouse: bool) -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    if mouse {
+        execute!(stdout, EnableMouseCapture)?;
+    }
     Terminal::new(CrosstermBackend::new(stdout))
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
+fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mouse: bool) -> io::Result<()> {
     disable_raw_mode()?;
+    if mouse {
+        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    }
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()
 }
@@ -109,6 +123,9 @@ async fn run(
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         handle_key(&mut app, key);
+                    }
+                    Some(Ok(Event::Mouse(mouse))) => {
+                        handle_mouse(&mut app, mouse, terminal.size()?);
                     }
                     Some(Ok(_)) => continue,
                     Some(Err(e)) => return Err(e),
@@ -230,6 +247,37 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
         // knowledge of what those are or what they're called, only that
         // `App` knows how to look one up by key.
         KeyCode::Char(c) => app.toggle_source_toggle(c),
+        _ => {}
+    }
+}
+
+fn handle_mouse(app: &mut App, mouse: MouseEvent, term_size: ratatui::layout::Size) {
+    let term_area = ratatui::layout::Rect::new(0, 0, term_size.width, term_size.height);
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            match ui::hit_test(term_area, app, mouse.column, mouse.row) {
+                Some(ui::MouseTarget::Entry { col_idx, row_idx }) => {
+                    app.click_entry(col_idx, row_idx)
+                }
+                Some(ui::MouseTarget::Column { col_idx }) => app.click_column(col_idx),
+                Some(ui::MouseTarget::Preview) => app.click_preview(),
+                None => {}
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            if ui::point_in_preview(term_area, app, mouse.column, mouse.row) {
+                app.preview_scroll_by(1)
+            } else {
+                app.move_selection(1)
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            if ui::point_in_preview(term_area, app, mouse.column, mouse.row) {
+                app.preview_scroll_by(-1)
+            } else {
+                app.move_selection(-1)
+            }
+        }
         _ => {}
     }
 }

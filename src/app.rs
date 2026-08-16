@@ -21,6 +21,12 @@ pub struct Column {
     /// true for the deepest column, immediately after `enter()` pushes a
     /// placeholder and before its `ColumnLoaded` result arrives.
     pub loading: bool,
+    /// Persisted across frames (unlike a fresh `ListState::default()` per
+    /// render) so its `offset()` reflects what was actually last drawn for
+    /// this column — needed to map a mouse click's row back to an entry
+    /// index. Ratatui computes/writes this during
+    /// `render_stateful_widget`, so it's read after render, not derived.
+    pub list_state: ListState,
 }
 
 /// Results of background `NodeSource` calls dispatched by `App`, delivered
@@ -85,7 +91,6 @@ pub struct App {
     /// to the currently focused directory (last). Entering a directory
     /// pushes a new column; going up pops the deepest one.
     pub columns: Vec<Column>,
-    pub list_state: ListState,
 
     pub preview: SanitizedText,
     /// Set from the most recently loaded preview's
@@ -184,7 +189,6 @@ impl App {
             zoom_preview: false,
             nerd_font,
             columns: Vec::new(),
-            list_state: ListState::default(),
             preview: SanitizedText::default(),
             preview_override_disable_line_numbers: false,
             preview_loading: false,
@@ -250,6 +254,7 @@ impl App {
                         entries,
                         selected,
                         loading: false,
+                        list_state: ListState::default(),
                     },
                     None,
                 )
@@ -262,6 +267,7 @@ impl App {
                         entries: Vec::new(),
                         selected: None,
                         loading: false,
+                        list_state: ListState::default(),
                     },
                     Some(msg),
                 )
@@ -303,7 +309,7 @@ impl App {
 
     fn sync_focused_list_state(&mut self) {
         let selected = self.focused().selected;
-        self.list_state.select(selected);
+        self.focused_mut().list_state.select(selected);
     }
 
     pub fn cwd(&self) -> String {
@@ -497,52 +503,107 @@ impl App {
         col.selected.and_then(|i| col.entries.get(i))
     }
 
-    pub fn move_selection(&mut self, delta: i32) {
+    /// Updates the focused column's selection and cursor-memory bookkeeping,
+    /// without dispatching a preview fetch — callers choose the debounced
+    /// or immediate variant afterward depending on whether the column
+    /// context just changed (see `dispatch_preview_update` vs. `_immediate`
+    /// and `click_entry` below). `idx` must be a valid index into the
+    /// focused column's entries.
+    fn set_focused_selection(&mut self, idx: usize) {
         let id = self.focused().id.clone();
         let col = self.focused_mut();
+        col.selected = Some(idx);
+        let name = col.entries[idx].name.clone();
+        self.cursor_memory.insert(id, name);
+        self.sync_focused_list_state();
+    }
+
+    pub fn move_selection(&mut self, delta: i32) {
+        let col = self.focused();
         if col.entries.is_empty() {
             return;
         }
         let len = col.entries.len() as i32;
         let current = col.selected.unwrap_or(0) as i32;
-        let next = (current + delta).clamp(0, len - 1) as usize;
-        if next as i32 == current {
+        let next = (current + delta).clamp(0, len - 1);
+        if next == current {
             // Already at the top/bottom of the column: nothing changed, so
             // skip the preview refetch and redraw entirely.
             return;
         }
-        col.selected = Some(next);
-        let name = col.entries[next].name.clone();
-        self.cursor_memory.insert(id, name);
-        self.sync_focused_list_state();
+        self.set_focused_selection(next as usize);
         self.dispatch_preview_update();
     }
 
     pub fn select_first(&mut self) {
-        let id = self.focused().id.clone();
-        let col = self.focused_mut();
-        if col.entries.is_empty() {
+        if self.focused().entries.is_empty() {
             return;
         }
-        col.selected = Some(0);
-        let name = col.entries[0].name.clone();
-        self.cursor_memory.insert(id, name);
-        self.sync_focused_list_state();
+        self.set_focused_selection(0);
         self.dispatch_preview_update();
     }
 
     pub fn select_last(&mut self) {
-        let id = self.focused().id.clone();
-        let col = self.focused_mut();
+        let col = self.focused();
         if col.entries.is_empty() {
             return;
         }
         let last = col.entries.len() - 1;
-        col.selected = Some(last);
-        let name = col.entries[last].name.clone();
-        self.cursor_memory.insert(id, name);
-        self.sync_focused_list_state();
+        self.set_focused_selection(last);
         self.dispatch_preview_update();
+    }
+
+    /// Handles a left-click on a row inside the column at `col_idx`
+    /// (0-based index into `self.columns`) at `row_idx` (0-based index into
+    /// that column's entries). Clicking a row in an earlier, already-open
+    /// column truncates the stack back to it first, mirroring pressing `h`
+    /// enough times. Clicking the already-selected row in the focused
+    /// column opens it, mirroring a second press of `l`/Enter; any other
+    /// click just moves the cursor there.
+    pub fn click_entry(&mut self, col_idx: usize, row_idx: usize) {
+        let Some(column) = self.columns.get(col_idx) else {
+            return;
+        };
+        if row_idx >= column.entries.len() {
+            return;
+        }
+
+        if col_idx == self.columns.len() - 1 {
+            if column.selected == Some(row_idx) {
+                self.enter();
+            } else {
+                self.set_focused_selection(row_idx);
+                self.dispatch_preview_update();
+            }
+            return;
+        }
+
+        self.columns.truncate(col_idx + 1);
+        self.preview_focused = false;
+        self.set_focused_selection(row_idx);
+        self.dispatch_preview_update_immediate();
+    }
+
+    /// Handles a left-click inside a non-focused column that missed every
+    /// row's hitbox (its border/title, or blank space below the last
+    /// entry) — moves focus there by truncating the stack back to it, same
+    /// as `click_entry`'s column-jump case, but leaves that column's
+    /// existing selection untouched since no specific row was clicked.
+    pub fn click_column(&mut self, col_idx: usize) {
+        if col_idx >= self.columns.len() {
+            return;
+        }
+        self.columns.truncate(col_idx + 1);
+        self.preview_focused = false;
+        self.dispatch_preview_update_immediate();
+    }
+
+    /// Handles a left-click on the preview pane: same as pressing `l`/Enter
+    /// on the currently selected entry — opens it as a new column if it's a
+    /// directory (the preview is showing that directory's listing), or
+    /// focuses the preview pane if it's a file.
+    pub fn click_preview(&mut self) {
+        self.enter();
     }
 
     /// Opens the selected directory as a new column to the right. Pushes a
@@ -562,6 +623,7 @@ impl App {
             entries: Vec::new(),
             selected: None,
             loading: true,
+            list_state: ListState::default(),
         });
         self.preview_focused = false;
         self.sync_focused_list_state();

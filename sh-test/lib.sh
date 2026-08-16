@@ -95,6 +95,17 @@ send_literal() {
     tmux send-keys -t "$SESSION" -l "$1"
 }
 
+# send_mouse_click <col0> <row0> — sends a left-click (press+release) SGR
+# mouse event at 0-based terminal coordinates, matching crossterm/ratatui's
+# Rect coordinate system (tmux's own mouse mode is off, so these raw bytes
+# pass straight through to the app's pty rather than being interpreted by
+# tmux itself).
+send_mouse_click() {
+    local col0="$1" row0="$2"
+    local col=$((col0 + 1)) row=$((row0 + 1))
+    tmux send-keys -t "$SESSION" -l "$(printf '\x1b[<0;%d;%dM\x1b[<0;%d;%dm' "$col" "$row" "$col" "$row")"
+}
+
 # wait_for <extended-regex> [timeout_seconds] — polls the pane until it
 # matches, so tests don't race the app's async column/preview fetches.
 wait_for() {
