@@ -1,4 +1,5 @@
 mod app;
+mod cli_error;
 mod command;
 mod entry;
 mod entry_preview;
@@ -29,6 +30,7 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
 use app::{App, AppUpdate};
+use cli_error::die;
 use fs_source::FsSource;
 
 const PAGE_SIZE: i32 = 10;
@@ -86,8 +88,7 @@ const ENV_ALLOWED_ARGS: &[&str] = &[
 fn env_flag_args() -> Option<Vec<String>> {
     let raw = env::var("IOTACTL_FLAGS").ok().filter(|s| !s.trim().is_empty())?;
     Some(shlex::split(&raw).unwrap_or_else(|| {
-        eprintln!("iotactl: failed to parse IOTACTL_FLAGS environment variable");
-        std::process::exit(1);
+        die("failed to parse IOTACTL_FLAGS environment variable")
     }))
 }
 
@@ -126,8 +127,7 @@ fn check_env_args_allowed(env_args: &[String]) {
             } else {
                 format!("--{}", id.replace('_', "-"))
             };
-            eprintln!("iotactl: IOTACTL_FLAGS may not set {display}");
-            std::process::exit(1);
+            die(format!("IOTACTL_FLAGS may not set {display}"));
         }
     }
 }
@@ -181,13 +181,29 @@ fn parse_cli() -> (Cli, Vec<(String, bool)>) {
 }
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() {
+    if let Err(e) = run_iotactl().await {
+        die(e);
+    }
+}
+
+/// Runs the program end to end. Kept separate from `main` so that any
+/// `io::Error` bubbling out — including ones just handed a friendlier
+/// message below — goes through [`die`] and prints as a plain `error: ...`
+/// line instead of `main`'s default Debug-formatted dump.
+async fn run_iotactl() -> io::Result<()> {
     let (cli, toggle_overrides) = parse_cli();
 
-    let start_dir = cli
-        .path
-        .unwrap_or_else(|| env::current_dir().expect("failed to get current directory"))
-        .canonicalize()?;
+    let given_path = cli.path.clone();
+    let start_dir = match cli.path {
+        Some(p) => p,
+        None => env::current_dir()
+            .map_err(|e| io::Error::new(e.kind(), format!("failed to get current directory: {e}")))?,
+    };
+    let start_dir = start_dir.canonicalize().map_err(|e| {
+        let shown = given_path.unwrap_or_else(|| PathBuf::from("."));
+        io::Error::new(e.kind(), format!("{}: {e}", shown.display()))
+    })?;
 
     let nerd_font = cli.nerd_font && !cli.no_nerd_font;
     let mouse = cli.mouse && !cli.no_mouse;

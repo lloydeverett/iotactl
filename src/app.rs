@@ -204,11 +204,10 @@ impl App {
                     else {
                         let mut valid = vec!["wrap".to_string(), "numbers".to_string(), "zoom".to_string()];
                         valid.extend(source_toggles.iter().map(|(t, _)| t.name.clone()));
-                        eprintln!(
-                            "iotactl: unknown toggle {name:?} (valid toggles: {})",
+                        crate::cli_error::die(format!(
+                            "unknown toggle {name:?} (valid toggles: {})",
                             valid.join(", ")
-                        );
-                        std::process::exit(1);
+                        ));
                     };
                     source_toggles[idx].1 = *value;
                     let _ = source.set_toggle(&source_toggles[idx].0, *value).await;
