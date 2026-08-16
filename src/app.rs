@@ -498,6 +498,12 @@ impl App {
         });
         self.preview_focused = false;
         self.sync_focused_list_state();
+        // The new column has no selection yet, so this just clears the
+        // preview instead of dispatching a fetch. Without it, the pane
+        // would keep showing the preview of the directory we just entered
+        // — now the wrong context — until `ColumnLoaded` arrives; see
+        // `go_up`'s use of the immediate variant for the same reason.
+        self.dispatch_preview_update_immediate();
 
         self.epoch += 1;
         let epoch = self.epoch;
