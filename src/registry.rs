@@ -28,9 +28,11 @@ use crate::toggle::Toggle;
 pub struct NodeSourceType {
     /// URI schemes that select this type on the CLI path (e.g.
     /// `"manual://"`), matched by prefix — [`create`] strips whichever
-    /// scheme matched before handing the rest to `construct`. Empty for the
-    /// filesystem type: it has no scheme of its own, since `create` falls
-    /// back to it, with the path given unaltered, when nothing else matches.
+    /// scheme matched before handing the rest to `construct`. The
+    /// filesystem type's own scheme (`"file://"`) is optional: `create`
+    /// falls back to it, with the path given unaltered, when nothing else
+    /// matches and the path doesn't otherwise look like a URI (see
+    /// [`looks_like_uri`]).
     pub schemes: &'static [&'static str],
     /// Manual content this type contributes about itself, embedded as a
     /// top-level topic in the manual's page tree (see [`crate::manual`]).
@@ -94,6 +96,28 @@ pub fn toggle_known(name: &str) -> bool {
     NODE_SOURCE_TYPES.iter().any(|source_type| source_type.has_toggle(name))
 }
 
+/// Whether `path_arg` looks like it's *trying* to be a URI — `scheme://...`
+/// — even though it matched none of [`NODE_SOURCE_TYPES`]'s schemes. Used by
+/// [`create`] to tell "this is a typo'd or unsupported scheme" apart from an
+/// ordinary filesystem path that just happens to contain a colon or slashes,
+/// so the former can get a descriptive error instead of being handed to the
+/// filesystem type and failing as a nonsense path.
+///
+/// Follows the scheme grammar from RFC 3986 §3.1: an alphabetic first
+/// character, then any mix of letters, digits, `+`, `-`, or `.`, immediately
+/// followed by `://`.
+fn looks_like_uri(path_arg: &str) -> bool {
+    let Some(scheme) = path_arg.split("://").next() else {
+        return false;
+    };
+    if scheme.len() == path_arg.len() {
+        return false; // no "://" present at all
+    }
+    let mut chars = scheme.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
 /// Splits the part of a CLI path after its scheme into id segments — the
 /// same shape [`crate::node_source::NodeSource::read_dir`] takes. Ignores
 /// empty segments (a leading, trailing, or doubled `/`) rather than
@@ -115,6 +139,13 @@ pub(crate) fn split_id(rest: &str) -> Vec<String> {
 /// filesystem type with the whole path — unlike every other type, its
 /// scheme is optional, so this fallback is special-cased here rather than
 /// driven by `NODE_SOURCE_TYPES` the way scheme matches are.
+///
+/// But a `path_arg` that merely *looks* like `scheme://...` without
+/// matching any registered scheme (see [`looks_like_uri`]) is never handed
+/// to the filesystem type — that would just fail later as a nonsense path
+/// (or worse, silently succeed against a same-named file or directory in
+/// the current directory). Instead this fails fast with an error naming the
+/// unrecognized scheme and what's actually available.
 pub fn create(path_arg: &str) -> io::Result<(Arc<dyn NodeSource>, &'static NodeSourceType)> {
     for &source_type in NODE_SOURCE_TYPES {
         for &scheme in source_type.schemes {
@@ -123,5 +154,55 @@ pub fn create(path_arg: &str) -> io::Result<(Arc<dyn NodeSource>, &'static NodeS
             }
         }
     }
+    if looks_like_uri(path_arg) {
+        let scheme = path_arg.split("://").next().unwrap();
+        let known: Vec<&str> = NODE_SOURCE_TYPES
+            .iter()
+            .flat_map(|source_type| source_type.schemes.iter().copied())
+            .collect();
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "unrecognized scheme \"{scheme}://\" (known schemes: {})",
+                known.join(", ")
+            ),
+        ));
+    }
     Ok((fs::NODE_SOURCE_TYPE.construct(path_arg)?, &fs::NODE_SOURCE_TYPE))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn looks_like_uri_accepts_a_well_formed_scheme() {
+        assert!(looks_like_uri("http://example.com"));
+        assert!(looks_like_uri("git+ssh://host/repo"));
+        assert!(looks_like_uri("a://"));
+    }
+
+    #[test]
+    fn looks_like_uri_rejects_plain_paths() {
+        assert!(!looks_like_uri("some/relative/path"));
+        assert!(!looks_like_uri("/etc/passwd"));
+        assert!(!looks_like_uri("C:\\Users\\foo"));
+        assert!(!looks_like_uri("not a scheme: still not one"));
+    }
+
+    #[test]
+    fn looks_like_uri_rejects_a_scheme_starting_with_a_digit() {
+        assert!(!looks_like_uri("9p://host/path"));
+    }
+
+    #[test]
+    fn create_rejects_an_unrecognized_scheme_instead_of_falling_back_to_fs() {
+        let Err(err) = create("bogus://something") else {
+            panic!("expected create() to fail for an unrecognized scheme");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let message = err.to_string();
+        assert!(message.contains("bogus://"), "message was: {message}");
+        assert!(message.contains("manual://"), "message was: {message}");
+    }
 }
