@@ -67,6 +67,14 @@ And this can probably turn into a clipboard.
 
 Could even have a marks view in a dialog.
 
+### Global marks
+
+Should be shared across all instances and across the program dying and being restarted.
+
+Mark stores the full path of the source it came from.
+
+So you can jump to a node from a totally different (unloaded) source at any time.
+
 ## "Manual of iotactl" node source
 
 Create an easily accessible manual, should be easy to get to via --manual or something.
