@@ -78,16 +78,17 @@ pub fn entry_label(entry: &Entry) -> (String, Style) {
 }
 
 /// Builds one preview line for `entry`: its sanitized, styled label (see
-/// `entry_label`), preceded by its Nerd Font icon when `nerd_font` is on.
-/// An icon with no color of its own (e.g. a folder, which lets the UI paint
-/// it whatever color directory names are drawn in) falls back to the
-/// label's own color rather than a fixed default, so the two stay in sync
-/// without this module needing to duplicate the source's color choice.
-pub fn entry_line(entry: &Entry, nerd_font: bool) -> Line<'static> {
+/// `entry_label`), preceded by its Nerd Font icon when the `--nerd-font`
+/// flag (see `crate::config`) is on. An icon with no color of its own
+/// (e.g. a folder, which lets the UI paint it whatever color directory
+/// names are drawn in) falls back to the label's own color rather than a
+/// fixed default, so the two stay in sync without this module needing to
+/// duplicate the source's color choice.
+pub fn entry_line(entry: &Entry) -> Line<'static> {
     let (label, style) = entry_label(entry);
     let mut line = SanitizedText::from_label(&label, style);
     if let Some(icon) = nerd_icon_span(
-        nerd_font,
+        crate::config::nerd_font(),
         entry.nerd_icon,
         entry.nerd_icon_color,
         style.fg,
@@ -103,10 +104,10 @@ pub fn entry_line(entry: &Entry, nerd_font: bool) -> Line<'static> {
 /// impl can call this from `preview_tui` when the previewed node is itself
 /// a directory — see `fs::FsSource::preview_tui_sync` for the
 /// canonical example.
-pub fn format_dir_preview(entries: &[Entry], nerd_font: bool) -> SanitizedText {
+pub fn format_dir_preview(entries: &[Entry]) -> SanitizedText {
     if entries.is_empty() {
         return SanitizedText::from_text("empty directory", Style::default().fg(Color::DarkGray));
     }
-    let lines = entries.iter().map(|e| entry_line(e, nerd_font)).collect();
+    let lines = entries.iter().map(entry_line).collect();
     SanitizedText::assume_sanitized(lines)
 }

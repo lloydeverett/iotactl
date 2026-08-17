@@ -64,6 +64,25 @@ impl Preview {
     }
 }
 
+/// One page of manual content that a node source type contributes,
+/// describing itself, to be embedded as a topic in [`crate::manual`]'s page
+/// tree. A source implementation (e.g. [`crate::fs::docs`]) publishes these
+/// as plain, inert data — it has no knowledge of the manual tree's shape or
+/// of `manual` at all. Only [`crate::registry`] (which pairs a source type
+/// with its `ManualPage`) and `manual` itself (which splices contributed
+/// pages into its tree) know what becomes of them.
+pub struct ManualPage {
+    /// The id segment this page is reached by, e.g. `"filesystem"`.
+    pub slug: &'static str,
+    /// Display name, shown as the entry name in a listing.
+    pub title: &'static str,
+    /// Markdown body shown when this page is a leaf (`children` is empty).
+    /// Unused for a category page, whose preview is its child listing
+    /// instead.
+    pub body: &'static str,
+    pub children: &'static [&'static ManualPage],
+}
+
 /// A boxed, `Send` handle to a node's raw, unrendered byte content, returned
 /// by [`NodeSource::open`]. Unlike [`Preview`] — which trades faithfulness
 /// for a bounded, display-ready result (a size limit, binary files skipped,
@@ -120,6 +139,13 @@ pub trait NodeSource: Send + Sync {
     /// other column's title icon is looked up from the `Entry` in its
     /// *parent* column that opened it (see `App::column_icon`), which
     /// doesn't work for the root.
+    ///
+    /// A source that wants the CLI path to address more finely than just
+    /// picking which source to use (e.g. the manual, via `manual://<page>`)
+    /// bakes that into its own scope at construction instead — see
+    /// `manual::ManualSource`'s `root` field for the pattern — so `id == []`
+    /// here still always means "this source's own configured root", never a
+    /// deeper node.
     async fn root_entry(&self) -> Entry;
 
     /// Builds a styled, display-ready preview for the node at `id`. Carries

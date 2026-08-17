@@ -82,10 +82,6 @@ pub struct App {
     /// focused, hiding the column stack. Has no visible effect while the
     /// column stack is focused instead — see `draw_columns`.
     pub zoom_preview: bool,
-    /// Whether Nerd Font icons are drawn to the left of filenames (in
-    /// listings and window titles). Set once from the `--nerd-font` CLI
-    /// flag and never changed at runtime.
-    pub nerd_font: bool,
 
     /// Stack of opened directories, from the fixed start dir (index 0) down
     /// to the currently focused directory (last). Entering a directory
@@ -185,7 +181,6 @@ impl App {
         start: Vec<String>,
         source: Arc<dyn NodeSource>,
         update_tx: mpsc::UnboundedSender<AppUpdate>,
-        nerd_font: bool,
         toggle_overrides: &[(String, bool)],
     ) -> Self {
         let root_entry = source.root_entry().await;
@@ -224,7 +219,6 @@ impl App {
             wrap_preview,
             show_line_numbers,
             zoom_preview,
-            nerd_font,
             columns: Vec::new(),
             preview: SanitizedText::default(),
             preview_override_disable_line_numbers: false,

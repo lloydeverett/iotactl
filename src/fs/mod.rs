@@ -152,12 +152,6 @@ pub struct FsSource {
     /// Same sharing rationale as `show_hidden`. Defaults to `false`: the
     /// preview shows content, not metadata.
     show_meta: Arc<AtomicBool>,
-    /// Whether directory previews (see `preview_tui_sync`) include Nerd
-    /// Font icons. Set once at construction from the `--nerd-font` CLI
-    /// flag — unlike the other fields here, it's not a user-facing toggle,
-    /// just a static rendering preference threaded down from `main`, so a
-    /// plain `bool` (rather than an `Arc<AtomicBool>`) is enough.
-    nerd_font: bool,
 }
 
 impl FsSource {
@@ -165,7 +159,7 @@ impl FsSource {
     /// directory the source will be scoped to. Errors carry `root` itself so
     /// callers can report e.g. `"some/bad/path: No such file or directory"`
     /// without needing to know this is backed by the filesystem.
-    pub fn new(root: &str, nerd_font: bool) -> io::Result<Self> {
+    pub fn new(root: &str) -> io::Result<Self> {
         let root =
             fs::canonicalize(root).map_err(|e| io::Error::new(e.kind(), format!("{root}: {e}")))?;
         Ok(FsSource {
@@ -173,7 +167,6 @@ impl FsSource {
             show_hidden: Arc::new(AtomicBool::new(false)),
             raw_markdown: Arc::new(AtomicBool::new(false)),
             show_meta: Arc::new(AtomicBool::new(false)),
-            nerd_font,
         })
     }
 
@@ -282,7 +275,7 @@ impl FsSource {
         match fs::metadata(&path) {
             Ok(meta) if meta.is_dir() => match self.read_dir_sync(id, cancelled) {
                 Ok(entries) => Preview {
-                    text: entry_preview::format_dir_preview(&entries, self.nerd_font),
+                    text: entry_preview::format_dir_preview(&entries),
                     override_disable_line_numbers: true,
                 },
                 Err(e) => Preview::new(error_text(e.to_string())),

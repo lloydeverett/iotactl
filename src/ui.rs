@@ -205,12 +205,12 @@ fn box_style(is_focused: bool) -> (Style, Style) {
 
 fn titled_box(
     icon: (Option<char>, Option<Color>),
-    nerd_font: bool,
     title: String,
     is_focused: bool,
 ) -> Block<'static> {
     let (border_style, title_style) = box_style(is_focused);
     let mut spans = vec![Span::styled(" ", title_style)];
+    let nerd_font = crate::config::nerd_font();
     // `pad_when_missing: false` — a title has no column of icons next to it
     // to line up against, so an entry with no icon opinion just omits the
     // span rather than leaving a blank gap.
@@ -247,7 +247,6 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
 
         let block = titled_box(
             app.column_icon(col_idx),
-            app.nerd_font,
             app.column_label(col_idx),
             is_focused,
         );
@@ -280,7 +279,7 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
             .enumerate()
             .map(|(i, entry)| {
                 let label_fg = (Some(i) == selected).then_some(selected_label_fg);
-                entry_item(entry, app.nerd_font, label_fg)
+                entry_item(entry, label_fg)
             })
             .collect();
 
@@ -311,12 +310,7 @@ fn draw_preview_column(f: &mut Frame, area: Rect, app: &mut App) {
         Some(entry) => entry.name.clone(),
         None => app.cwd(),
     };
-    let block = titled_box(
-        app.preview_title_icon(),
-        app.nerd_font,
-        title,
-        app.preview_focused,
-    );
+    let block = titled_box(app.preview_title_icon(), title, app.preview_focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
     app.preview_viewport_height = inner.height;
@@ -561,7 +555,7 @@ fn toggle_span(key: char, label: &str, on: bool) -> Span<'static> {
 /// to the label span, deliberately — see the comment where callers compute
 /// it in `draw_columns` for why the icon span must stay untouched by
 /// selection instead of picking this up via `List::highlight_style`.
-fn entry_item(entry: &Entry, nerd_font: bool, selected_label_fg: Option<Color>) -> ListItem<'static> {
+fn entry_item(entry: &Entry, selected_label_fg: Option<Color>) -> ListItem<'static> {
     let (label, style) = entry_label(entry);
     let mut spans = Vec::new();
     // `pad_when_missing: true` — unlike a title, this is one row in a
@@ -571,7 +565,13 @@ fn entry_item(entry: &Entry, nerd_font: bool, selected_label_fg: Option<Color>) 
     // `selected_label_fg`) when the icon has none of its own, so e.g. a
     // folder icon matches the directory-name color it normally sits next
     // to, and keeps that color even while the row is selected.
-    if let Some(icon) = nerd_icon_span(nerd_font, entry.nerd_icon, entry.nerd_icon_color, style.fg, true) {
+    if let Some(icon) = nerd_icon_span(
+        crate::config::nerd_font(),
+        entry.nerd_icon,
+        entry.nerd_icon_color,
+        style.fg,
+        true,
+    ) {
         spans.push(icon);
     }
     let label_style = match selected_label_fg {

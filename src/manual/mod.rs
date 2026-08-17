@@ -11,16 +11,17 @@
 //! exactly like a markdown file preview does.
 //!
 //! This module owns only the tree structure and the pages that describe
-//! iotactl itself (e.g. navigation). A page that documents another source
-//! (e.g. the filesystem source) pulls its text from that source's own
-//! `docs` module (e.g. [`crate::fs::docs`]) instead of this module
-//! restating it, so this module never needs to know how that source
-//! actually works.
+//! iotactl itself (e.g. navigation). A page that documents another node
+//! source type (e.g. the filesystem source) is instead contributed by that
+//! type itself and spliced into the tree via [`crate::registry`] — see
+//! [`crate::registry::NodeSourceType::manual_page`] — so this module never
+//! needs to know that other source types even exist, let alone how they
+//! work.
 
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use ratatui::style::{Color, Style};
@@ -28,9 +29,9 @@ use ratatui::style::{Color, Style};
 use crate::command::Command;
 use crate::entry::Entry;
 use crate::entry_preview;
-use crate::fs;
 use crate::highlight;
-use crate::node_source::{ByteStream, Cancelled, NodeSource, Preview};
+use crate::node_source::{ByteStream, Cancelled, ManualPage, NodeSource, Preview};
+use crate::registry;
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 
@@ -40,70 +41,56 @@ use crate::toggle::Toggle;
 /// actually opened.
 const MANUAL_PAGE_PATH: &str = "manual.md";
 
-/// One page in the manual's fixed tree.
-struct ManualPage {
-    /// The id segment this page is reached by, e.g. `"filesystem"`. Unused
-    /// for the root page, since `id == []` reaches it directly.
-    slug: &'static str,
-    /// Display name, shown as the entry name in a listing.
-    title: &'static str,
-    /// Markdown body shown when this page is a leaf (`children` is empty).
-    /// Unused for a category page, whose preview is its child listing
-    /// instead — see the module docs.
-    body: &'static str,
-    children: &'static [ManualPage],
-}
+/// Fixed top-level topics about iotactl and the manual itself. Every node
+/// source type may contribute one more top-level topic of its own — see
+/// `ROOT` below — but these four describe iotactl itself rather than any
+/// particular source, so they aren't sourced from anywhere else.
+static FIXED_ROOT_CHILDREN: &[&ManualPage] = &[
+    &ManualPage {
+        slug: "about-manual",
+        title: "About This Manual",
+        body: ABOUT_MANUAL,
+        children: &[],
+    },
+    &ManualPage {
+        slug: "cli",
+        title: "Command-Line Options",
+        body: CLI_OPTIONS,
+        children: &[],
+    },
+    &ManualPage {
+        slug: "navigation",
+        title: "Navigation & Keybindings",
+        body: NAVIGATION,
+        children: &[],
+    },
+    &ManualPage {
+        slug: "node-sources",
+        title: "Node Sources",
+        body: NODE_SOURCES_OVERVIEW,
+        children: &[],
+    },
+];
 
-static ROOT: ManualPage = ManualPage {
-    slug: "",
-    title: "iotactl Manual",
-    body: "",
-    children: &[
-        ManualPage {
-            slug: "about-manual",
-            title: "About This Manual",
-            body: ABOUT_MANUAL,
-            children: &[],
-        },
-        ManualPage {
-            slug: "cli",
-            title: "Command-Line Options",
-            body: CLI_OPTIONS,
-            children: &[],
-        },
-        ManualPage {
-            slug: "navigation",
-            title: "Navigation & Keybindings",
-            body: NAVIGATION,
-            children: &[],
-        },
-        ManualPage {
-            slug: "node-sources",
-            title: "Node Sources",
-            body: NODE_SOURCES_OVERVIEW,
-            children: &[],
-        },
-        ManualPage {
-            slug: "filesystem",
-            title: fs::docs::NAME,
-            body: "",
-            children: &[
-                ManualPage {
-                    slug: "overview",
-                    title: "Overview",
-                    body: fs::docs::OVERVIEW,
-                    children: &[],
-                },
-                ManualPage {
-                    slug: "toggles",
-                    title: "Toggles",
-                    body: fs::docs::TOGGLES,
-                    children: &[],
-                },
-            ],
-        },
-    ],
-};
+/// The manual's page tree: `FIXED_ROOT_CHILDREN` above, plus one more
+/// top-level topic per node source type that has something to say about
+/// itself (see `crate::registry::NodeSourceType::manual_page`). Built
+/// lazily, once, on first access — a plain `static` can't splice a
+/// registry-provided list into a compile-time array the way this does.
+static ROOT: LazyLock<ManualPage> = LazyLock::new(|| {
+    let mut children: Vec<&'static ManualPage> = FIXED_ROOT_CHILDREN.to_vec();
+    children.extend(
+        registry::NODE_SOURCE_TYPES
+            .iter()
+            .filter_map(|source_type| source_type.manual_page),
+    );
+    ManualPage {
+        slug: "",
+        title: "iotactl Manual",
+        body: "",
+        children: Box::leak(children.into_boxed_slice()),
+    }
+});
 
 /// Written in ASD-STE100 style (short sentences, one idea per sentence,
 /// plain words) since this text is user-facing.
@@ -144,7 +131,12 @@ PATH sets where iotactl starts browsing.
 
 - Give a real path to browse it as a directory.
 - Give no path to browse the current directory.
+- Give `file://` followed by a real path to browse it explicitly. Same as
+  giving the path alone, but useful if the path itself could be mistaken for
+  something else.
 - Give `manual://` to open this manual instead.
+- Give `manual://` followed by a topic's id (e.g. `manual://filesystem`) to
+  open the manual there instead of at its top level.
 
 ## Nerd Font icons
 
@@ -243,13 +235,21 @@ Only one source is active at a time, chosen by the PATH argument you pass to
 iotactl. See the \"Command-Line Options\" topic.";
 
 /// Walks `id` down from the root, one segment per level, matching each
-/// segment against a child's `slug`. Returns `None` if any segment doesn't
-/// match — the same "no such node" case a real source would report if a
-/// caller handed it a stale or invalid id.
+/// segment against a child's `slug` (case-insensitively, so e.g. a
+/// CLI-supplied `manual://Filesystem` reaches the same page a lowercase
+/// `manual://filesystem` would — every id `find_page` sees that *isn't*
+/// CLI-supplied is already exactly the stored slug, so this never changes
+/// which page ordinary in-app navigation reaches). Returns `None` if any
+/// segment doesn't match — the same "no such node" case a real source would
+/// report if a caller handed it a stale or invalid id.
 fn find_page(id: &[String]) -> Option<&'static ManualPage> {
-    let mut page = &ROOT;
+    let mut page: &'static ManualPage = &ROOT;
     for segment in id {
-        page = page.children.iter().find(|child| child.slug == segment)?;
+        page = page
+            .children
+            .iter()
+            .find(|child| child.slug.eq_ignore_ascii_case(segment))
+            .copied()?;
     }
     Some(page)
 }
@@ -279,33 +279,47 @@ fn entry_icon(is_dir: bool) -> (char, Option<Color>) {
     }
 }
 
+/// Builds the `Entry` for `page`, addressed at `id` — shared by
+/// `child_entries` (one call per child of the page being listed) and
+/// `ManualSource::root_entry` (one call for whatever page `App`'s `start`
+/// points at).
+fn page_entry(id: Vec<String>, page: &ManualPage) -> Entry {
+    let is_dir = !page.children.is_empty();
+    let (icon, icon_color) = entry_icon(is_dir);
+    Entry {
+        name: page.title.to_string(),
+        id,
+        is_dir,
+        is_link: false,
+        suggested_commands: Arc::from(Vec::new()),
+        nerd_icon: Some(icon),
+        nerd_icon_color: icon_color,
+    }
+}
+
 fn child_entries(id: &[String], page: &ManualPage) -> Vec<Entry> {
     page.children
         .iter()
         .map(|child| {
             let mut child_id = id.to_vec();
             child_id.push(child.slug.to_string());
-            let is_dir = !child.children.is_empty();
-            let (icon, icon_color) = entry_icon(is_dir);
-            Entry {
-                name: child.title.to_string(),
-                id: child_id,
-                is_dir,
-                is_link: false,
-                suggested_commands: Arc::from(Vec::new()),
-                nerd_icon: Some(icon),
-                nerd_icon_color: icon_color,
-            }
+            page_entry(child_id, child)
         })
         .collect()
 }
 
-/// A `NodeSource` that shows the fixed manual tree defined in this module.
+/// A `NodeSource` that shows the fixed manual tree defined in this module,
+/// scoped at construction to `root` — same idea as `fs::FsSource` scoping
+/// itself to a root directory, just with a fixed in-memory tree standing in
+/// for the filesystem. Every id this source is given via the `NodeSource`
+/// trait (e.g. `App`'s `start`, always `[]`) is relative to `root`, not to
+/// this module's true top level — see `absolute`.
 pub struct ManualSource {
-    /// Threaded down from the `--nerd-font` CLI flag, purely so this
-    /// source's own directory-style previews (see `preview_tui`) pad their
-    /// entries the same way every other source's listing does.
-    nerd_font: bool,
+    /// Absolute id (within this module's fixed page tree — see
+    /// `find_page`) that this source is scoped to. `[]` for the plain
+    /// `manual://` case (scoped at the tree's own top level); e.g.
+    /// `["filesystem"]` for `manual://filesystem`.
+    root: Vec<String>,
     /// Whether a leaf page's preview shows its markdown marks as-is (`true`)
     /// or rendered/hidden (`false`, the default) — see
     /// `crate::highlight::RAW_TOGGLE_NAME`. Not shared via `Arc` like `fs`'s
@@ -319,11 +333,24 @@ pub struct ManualSource {
 }
 
 impl ManualSource {
-    pub fn new(nerd_font: bool) -> Self {
-        ManualSource {
-            nerd_font,
+    /// `root` scopes this source the way `fs::FsSource::new`'s `root`
+    /// parameter scopes a filesystem source: every id given to this source
+    /// afterward is resolved relative to it (see `absolute`). Rejected
+    /// eagerly, before any part of the app is built, if it doesn't name a
+    /// real page — mirroring `FsSource::new` rejecting a nonexistent
+    /// directory the same way.
+    pub fn new(root: Vec<String>) -> io::Result<Self> {
+        find_page(&root).ok_or_else(|| no_such_page(&root))?;
+        Ok(ManualSource {
+            root,
             raw_markdown: AtomicBool::new(false),
-        }
+        })
+    }
+
+    /// Resolves a relative `id` (as given to any `NodeSource` method) to
+    /// the absolute id `find_page` expects.
+    fn absolute(&self, id: &[String]) -> Vec<String> {
+        self.root.iter().chain(id).cloned().collect()
     }
 }
 
@@ -336,26 +363,22 @@ impl NodeSource for ManualSource {
     // the case in this source that *does* need it, and `node_source`'s
     // docs for the general rule.
     async fn read_dir(&self, id: &[String]) -> io::Result<Vec<Entry>> {
-        let page = find_page(id).ok_or_else(|| no_such_page(id))?;
+        let absolute = self.absolute(id);
+        let page = find_page(&absolute).ok_or_else(|| no_such_page(&absolute))?;
         Ok(child_entries(id, page))
     }
 
     async fn root_entry(&self) -> Entry {
-        let (icon, icon_color) = entry_icon(true);
-        Entry {
-            name: ROOT.title.to_string(),
-            id: Vec::new(),
-            is_dir: true,
-            is_link: false,
-            suggested_commands: Arc::from(Vec::new()),
-            nerd_icon: Some(icon),
-            nerd_icon_color: icon_color,
-        }
+        // Always succeeds: `self.root` was already validated by
+        // `ManualSource::new`, and never changes afterward.
+        let page = find_page(&self.root).expect("ManualSource::new validated `root`");
+        page_entry(Vec::new(), page)
     }
 
     async fn preview_tui(&self, id: &[String], _cancelled: &Cancelled) -> Preview {
-        let Some(page) = find_page(id) else {
-            return Preview::new(error_text(no_such_page(id).to_string()));
+        let absolute = self.absolute(id);
+        let Some(page) = find_page(&absolute) else {
+            return Preview::new(error_text(no_such_page(&absolute).to_string()));
         };
         if page.children.is_empty() {
             // Reconciled with `fs::FsSource::preview_tui`: syntax-highlighting
@@ -384,14 +407,15 @@ impl NodeSource for ManualSource {
             // too cheap to be worth `spawn_blocking`'s own dispatch
             // overhead, same reasoning as `read_dir` below.
             Preview {
-                text: entry_preview::format_dir_preview(&child_entries(id, page), self.nerd_font),
+                text: entry_preview::format_dir_preview(&child_entries(id, page)),
                 override_disable_line_numbers: true,
             }
         }
     }
 
     async fn open(&self, id: &[String]) -> io::Result<ByteStream> {
-        let page = find_page(id).ok_or_else(|| no_such_page(id))?;
+        let absolute = self.absolute(id);
+        let page = find_page(&absolute).ok_or_else(|| no_such_page(&absolute))?;
         // The whole page already lives in memory as a `&'static str` (see
         // the module docs), so there's no actual streaming to do — this
         // just satisfies `NodeSource::open`'s interface the same way `fs`'s

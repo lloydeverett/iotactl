@@ -27,3 +27,9 @@ But make it allow for different terminal capabilities and allow for user customi
 
 ## Test error handling behaviour when intermediate directories that are being viewed are removed or renamed
 
+## Error behaviour is a bit weird with previews
+
+e.g. try `iotactl / ` and view `/root`
+
+Need to forbid line numbers here but also make it lowercase.
+

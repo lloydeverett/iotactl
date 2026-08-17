@@ -1,19 +1,22 @@
-//! Documentation content for `fs`, exposed so the `manual` node source can
-//! show it. `fs` has no knowledge that `manual` exists; it only publishes
-//! plain constants here for any interested caller to embed. `manual` shows
-//! this text as markdown (see `crate::highlight::highlighted_text`), so it
-//! is written in markdown, and in ASD-STE100 style (short sentences, one
-//! idea per sentence, plain words) since it is user-facing.
+//! Documentation content for `fs`, published as a [`ManualPage`] so
+//! [`crate::registry`] can hand it to the `manual` node source. `fs` has no
+//! knowledge that `manual` exists — it only publishes plain, inert data
+//! here. That data is shown as markdown (see
+//! `crate::highlight::highlighted_text`), so it is written in markdown, and
+//! in ASD-STE100 style (short sentences, one idea per sentence, plain
+//! words) since it is user-facing.
 //!
 //! Keep this in sync by hand with the real toggle names/keys in `super`
 //! (`HIDDEN_TOGGLE_NAME` and friends, and `crate::highlight::RAW_TOGGLE_NAME`)
 //! if those ever change.
 
+use crate::node_source::ManualPage;
+
 /// Title for this source's section of the manual.
-pub const NAME: &str = "Filesystem";
+const NAME: &str = "Filesystem";
 
 /// What this source is and how it is scoped.
-pub const OVERVIEW: &str = "\
+const OVERVIEW: &str = "\
 # Filesystem
 
 The filesystem source shows real files and directories on disk. It is the
@@ -45,7 +48,7 @@ A file with raw binary bytes has no text preview. iotactl shows its size
 instead.";
 
 /// The toggles this source exposes (see `available_toggles`).
-pub const TOGGLES: &str = "\
+const TOGGLES: &str = "\
 # Filesystem Toggles
 
 A toggle turns a feature on or off. Each toggle has one key. Press `t` to open
@@ -78,3 +81,26 @@ Metadata includes:
 - Timestamps
 
 The meta toggle is off by default.";
+
+/// This source's contribution to the manual: itself as a top-level topic,
+/// with `OVERVIEW` and `TOGGLES` as its two pages. Handed to the manual node
+/// source only indirectly, via `crate::registry::NodeSourceType`.
+pub static MANUAL_PAGE: ManualPage = ManualPage {
+    slug: "filesystem",
+    title: NAME,
+    body: "",
+    children: &[
+        &ManualPage {
+            slug: "overview",
+            title: "Overview",
+            body: OVERVIEW,
+            children: &[],
+        },
+        &ManualPage {
+            slug: "toggles",
+            title: "Toggles",
+            body: TOGGLES,
+            children: &[],
+        },
+    ],
+};
