@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::node_source::{ByteStream, Cancelled};
+use crate::node_source::{ByteStream, Cancelled, SeekableByteStream};
 
 use super::vfs::{DirEntryInfo, Vfs, Metadata, UnixMetadata};
 
@@ -108,6 +108,13 @@ impl Vfs for RealVfs {
         // syscall via `spawn_blocking` internally, and its `AsyncRead` impl
         // does the same per-read, so no explicit `spawn_blocking` is needed
         // here.
+        let file = tokio::fs::File::open(path).await?;
+        Ok(Box::pin(file))
+    }
+
+    async fn open_seekable(&self, path: &Path) -> io::Result<SeekableByteStream> {
+        // `tokio::fs::File` already implements `AsyncSeek`, so this can
+        // always satisfy the guarantee `open_seekable` makes.
         let file = tokio::fs::File::open(path).await?;
         Ok(Box::pin(file))
     }

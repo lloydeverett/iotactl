@@ -30,7 +30,9 @@ use crate::command::Command;
 use crate::entry::Entry;
 use crate::entry_preview;
 use crate::highlight;
-use crate::node_source::{ByteStream, Cancelled, ManualPage, NodeSource, Preview};
+use crate::node_source::{
+    ByteStream, Cancelled, ManualPage, NodeSource, Preview, SeekableByteStream,
+};
 use crate::registry;
 use crate::registry::NodeSourceType;
 use crate::sanitize::SanitizedText;
@@ -465,6 +467,14 @@ impl NodeSource for ManualSource {
         // the module docs), so there's no actual streaming to do — this
         // just satisfies `NodeSource::open`'s interface the same way `fs`'s
         // real, incremental file stream does.
+        Ok(Box::pin(std::io::Cursor::new(page.body.as_bytes())))
+    }
+
+    async fn open_seekable(&self, id: &[String]) -> io::Result<SeekableByteStream> {
+        let absolute = self.absolute(id);
+        let page = find_page(&absolute).ok_or_else(|| no_such_page(&absolute))?;
+        // `std::io::Cursor` implements `AsyncSeek` too, so this can always
+        // satisfy the guarantee `open_seekable` makes.
         Ok(Box::pin(std::io::Cursor::new(page.body.as_bytes())))
     }
 

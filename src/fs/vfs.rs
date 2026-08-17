@@ -24,7 +24,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 
-use crate::node_source::{ByteStream, Cancelled};
+use crate::node_source::{ByteStream, Cancelled, SeekableByteStream};
 
 /// Unix-only metadata fields, held separately from [`Metadata`] rather than
 /// inlined into it since they have no meaningful value on a non-Unix
@@ -138,4 +138,9 @@ pub trait Vfs: Send + Sync {
     /// that isn't already async-aware should do its own equivalent of
     /// `spawn_blocking` internally rather than block the caller's task.
     async fn open(&self, path: &Path) -> io::Result<ByteStream>;
+
+    /// Like [`open`](Vfs::open), but guarantees the returned stream supports
+    /// seeking, backing [`NodeSource::open_seekable`](crate::node_source::NodeSource::open_seekable).
+    /// See that method's docs.
+    async fn open_seekable(&self, path: &Path) -> io::Result<SeekableByteStream>;
 }

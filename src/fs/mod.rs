@@ -12,7 +12,7 @@ use crate::command::Command;
 use crate::entry::Entry;
 use crate::entry_preview;
 use crate::highlight;
-use crate::node_source::{ByteStream, Cancelled, NodeSource, Preview};
+use crate::node_source::{ByteStream, Cancelled, NodeSource, Preview, SeekableByteStream};
 use crate::registry::NodeSourceType;
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
@@ -393,6 +393,11 @@ impl NodeSource for FsSource {
     async fn open(&self, id: &[String]) -> io::Result<ByteStream> {
         let path = self.path_from_segments(id)?;
         self.vfs.open(&path).await
+    }
+
+    async fn open_seekable(&self, id: &[String]) -> io::Result<SeekableByteStream> {
+        let path = self.path_from_segments(id)?;
+        self.vfs.open_seekable(&path).await
     }
 
     async fn execute_command(&self, command: &Command, _args: &[String]) -> io::Result<()> {

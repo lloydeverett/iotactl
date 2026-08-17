@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::command::Command;
 use crate::entry::Entry;
@@ -91,6 +91,17 @@ pub struct ManualPage {
 /// holding the whole thing in memory at once.
 pub type ByteStream = Pin<Box<dyn AsyncRead + Send>>;
 
+/// A reader that also supports seeking, so it can be boxed as a single
+/// trait object rather than two separate ones over the same underlying
+/// value.
+pub trait AsyncReadSeek: AsyncRead + AsyncSeek {}
+impl<T: AsyncRead + AsyncSeek + ?Sized> AsyncReadSeek for T {}
+
+/// Like [`ByteStream`], but returned by [`NodeSource::open_seekable`]:
+/// whenever that call succeeds, the stream it hands back is guaranteed to
+/// support seeking, unlike a plain [`ByteStream`] which may or may not.
+pub type SeekableByteStream = Pin<Box<dyn AsyncReadSeek + Send>>;
+
 /// Abstracts access to a hierarchy of directories and files.
 ///
 /// # Do real work off the render thread
@@ -165,6 +176,14 @@ pub trait NodeSource: Send + Sync {
     /// its size limit — since there's no rendering to do and nothing here
     /// needs to fit in memory all at once. Not yet invoked anywhere.
     async fn open(&self, id: &[String]) -> io::Result<ByteStream>;
+
+    /// Like [`open`](NodeSource::open), but guarantees the returned stream
+    /// supports seeking whenever this returns `Ok`. A source that can't
+    /// offer that guarantee cheaply (e.g. something streamed straight off a
+    /// socket, with no way to seek without buffering it all first) should
+    /// return an `Unsupported` error here rather than a stream that can't
+    /// actually seek. Not yet invoked anywhere.
+    async fn open_seekable(&self, id: &[String]) -> io::Result<SeekableByteStream>;
 
     /// Runs `command` with `args`. Not yet invoked anywhere.
     async fn execute_command(&self, command: &Command, args: &[String]) -> io::Result<()>;
