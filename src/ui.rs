@@ -4,6 +4,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use crate::app::App;
 use crate::entry::Entry;
 use crate::entry_preview::{entry_label, nerd_icon_span};
+use crate::sanitize::SanitizedText;
 
 /// Width of a non-focused opened directory column, in terminal cells.
 const COLUMN_WIDTH: u16 = 24;
@@ -217,7 +218,13 @@ fn titled_box(
     if let Some(icon_span) = nerd_icon_span(nerd_font, icon.0, icon.1, None, false) {
         spans.push(icon_span);
     }
-    spans.push(Span::styled(format!("{title} "), title_style));
+    // `title` is an entry/directory name straight from the OS (see
+    // `Entry::name`), so it's routed through `SanitizedText::from_label`
+    // like any other filename before it reaches a `Span` — otherwise a
+    // raw tab or control character in it would bypass the sanitizer this
+    // whole codebase relies on to avoid corrupting the terminal.
+    spans.extend(SanitizedText::from_label(&title, title_style).spans);
+    spans.push(Span::styled(" ", title_style));
     Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
