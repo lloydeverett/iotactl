@@ -248,7 +248,7 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
         let block = titled_box(
             app.column_icon(col_idx),
             app.nerd_font,
-            app.path_label(&column.id),
+            app.column_label(col_idx),
             is_focused,
         );
 
@@ -308,7 +308,7 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn draw_preview_column(f: &mut Frame, area: Rect, app: &mut App) {
     let title = match app.selected_entry() {
-        Some(entry) => app.path_label(&entry.id),
+        Some(entry) => entry.name.clone(),
         None => app.cwd(),
     };
     let block = titled_box(

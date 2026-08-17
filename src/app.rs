@@ -350,18 +350,30 @@ impl App {
     }
 
     pub fn cwd(&self) -> String {
-        self.path_label(&self.focused().id)
+        self.column_label(self.columns.len() - 1)
     }
 
-    /// Display name for a node id: just the node's own name, e.g.
-    /// `path_label(&["a", "b"])` is `"b"`. The root (id == []) has no name
-    /// of its own, so it falls back to `root_label`. Used as the title of
-    /// each column's and the preview's box.
-    pub fn path_label(&self, id: &[String]) -> String {
-        match id.last() {
-            Some(name) => name.clone(),
-            None => self.root_entry.name.clone(),
-        }
+    /// Display name for the column at `idx`, for use as its box's title.
+    /// A node's id and its display name can differ (e.g. the manual source
+    /// uses a stable slug for the id but a friendlier string, possibly with
+    /// spaces or punctuation, as the name) — so, mirroring `column_icon`,
+    /// this looks up the `Entry` that was selected in the *previous* column
+    /// to open it, rather than assuming the id's last segment doubles as
+    /// the name. Falls back to that segment if the entry can no longer be
+    /// found (e.g. removed by a concurrent change). The root column
+    /// (`idx == 0`) has no such parent, so its label comes from
+    /// `root_entry` instead.
+    pub fn column_label(&self, idx: usize) -> String {
+        let Some(parent) = idx.checked_sub(1).map(|i| &self.columns[i]) else {
+            return self.root_entry.name.clone();
+        };
+        let id = &self.columns[idx].id;
+        parent
+            .entries
+            .iter()
+            .find(|e| &e.id == id)
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| id.last().cloned().unwrap_or_default())
     }
 
     /// Nerd Font icon/color for the column at `idx`'s title, looked up from

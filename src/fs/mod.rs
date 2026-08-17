@@ -17,6 +17,8 @@ use crate::node_source::{Cancelled, NodeSource, Preview};
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 
+pub mod docs;
+
 const PREVIEW_READ_LIMIT: usize = 64 * 1024;
 
 /// Name of the toggle, exposed via `available_toggles`, that controls
@@ -27,22 +29,10 @@ const PREVIEW_READ_LIMIT: usize = 64 * 1024;
 const HIDDEN_TOGGLE_NAME: &str = "hidden";
 
 /// Name of the toggle, exposed via `available_toggles`, that controls
-/// whether markdown formatting characters (`#`, ```` ``` ````, `*`, ...) are
-/// shown as-is in previews (on) or hidden (off, the default). The underlying
-/// syntax highlighting (e.g. headings/emphasis/code spans still being
-/// colored) is unaffected either way — see `highlight::highlight`'s
-/// `hide_markers` parameter, which is simply this toggle's negation.
-const RAW_TOGGLE_NAME: &str = "raw";
-
-/// Name of the toggle, exposed via `available_toggles`, that controls
 /// whether the preview shows the selected node's metadata (size,
 /// permissions, timestamps, ...) instead of its normal contents (file text
 /// or directory listing). Off by default.
 const META_TOGGLE_NAME: &str = "meta";
-
-/// Nerd Font glyph for a folder (any directory, regardless of name). Has no
-/// fixed color of its own — see `entry_icon`.
-const FOLDER_ICON: char = '\u{f07b}';
 
 /// Nerd Font glyph/color for a file whose type isn't recognized by
 /// [`file_icon`]. Kept distinct from other icons so an unrecognized file
@@ -99,7 +89,7 @@ fn file_icon(name: &str) -> (char, Color) {
         "lua" => ('\u{e620}', Color::Rgb(0, 111, 184)),
         "rb" => ('\u{e739}', Color::Red),
         "sh" | "bash" | "zsh" => ('\u{e795}', Color::Green),
-        "md" | "markdown" => ('\u{e73e}', Color::Rgb(220, 220, 220)),
+        "md" | "markdown" => highlight::MARKDOWN_ICON,
         "png" | "jpg" | "jpeg" | "gif" | "svg" | "bmp" | "webp" => {
             ('\u{f1c5}', Color::Magenta)
         }
@@ -113,14 +103,14 @@ fn file_icon(name: &str) -> (char, Color) {
 /// Picks the Nerd Font glyph/color for an entry, per `fs`'s policy:
 /// files are looked up by name via [`file_icon`], falling back to
 /// [`GENERIC_FILE_ICON`] for anything unrecognized. Folders always get
-/// [`FOLDER_ICON`] but deliberately with no color opinion (`None`): the UI
-/// already has a fixed color for directory names (see
+/// [`entry_preview::FOLDER_ICON`] but deliberately with no color opinion
+/// (`None`): the UI already has a fixed color for directory names (see
 /// `entry_preview::entry_label`), and falls back to that same color for an
 /// icon with none of its own, so the folder icon tracks it automatically
 /// instead of this module hardcoding a second, possibly-drifting choice.
 fn entry_icon(name: &str, is_dir: bool) -> (char, Option<Color>) {
     if is_dir {
-        (FOLDER_ICON, None)
+        (entry_preview::FOLDER_ICON, None)
     } else {
         let (icon, color) = file_icon(name);
         (icon, Some(color))
@@ -327,7 +317,7 @@ impl NodeSource for FsSource {
             is_dir: true,
             is_link: false,
             suggested_commands: Arc::from(Vec::new()),
-            nerd_icon: Some(FOLDER_ICON),
+            nerd_icon: Some(entry_preview::FOLDER_ICON),
             nerd_icon_color: None,
         }
     }
@@ -354,8 +344,8 @@ impl NodeSource for FsSource {
                 key: 'H',
             },
             Toggle {
-                name: RAW_TOGGLE_NAME.to_string(),
-                key: 'r',
+                name: highlight::RAW_TOGGLE_NAME.to_string(),
+                key: highlight::RAW_TOGGLE_KEY,
             },
             Toggle {
                 name: META_TOGGLE_NAME.to_string(),
@@ -368,7 +358,7 @@ impl NodeSource for FsSource {
         if toggle.name == HIDDEN_TOGGLE_NAME {
             self.show_hidden.store(value, Ordering::SeqCst);
             Ok(())
-        } else if toggle.name == RAW_TOGGLE_NAME {
+        } else if toggle.name == highlight::RAW_TOGGLE_NAME {
             self.raw_markdown.store(value, Ordering::SeqCst);
             Ok(())
         } else if toggle.name == META_TOGGLE_NAME {
@@ -385,7 +375,7 @@ impl NodeSource for FsSource {
     async fn get_toggle(&self, toggle: &Toggle) -> io::Result<bool> {
         if toggle.name == HIDDEN_TOGGLE_NAME {
             Ok(self.show_hidden.load(Ordering::SeqCst))
-        } else if toggle.name == RAW_TOGGLE_NAME {
+        } else if toggle.name == highlight::RAW_TOGGLE_NAME {
             Ok(self.raw_markdown.load(Ordering::SeqCst))
         } else if toggle.name == META_TOGGLE_NAME {
             Ok(self.show_meta.load(Ordering::SeqCst))
@@ -438,17 +428,7 @@ fn preview_file(path: &Path, hide_markers: bool) -> Preview {
         };
     }
     match String::from_utf8(buf) {
-        Ok(text) => {
-            let sanitized = SanitizedText::from_text(&text, Style::default());
-            let text = match highlight::highlight(path, &sanitized.plain(), hide_markers) {
-                // Safe: the highlighter only re-slices and re-styles the
-                // already-sanitized plain text handed to it above, so it
-                // can't introduce a raw control character of its own.
-                Some(lines) => SanitizedText::assume_sanitized(lines),
-                None => sanitized,
-            };
-            Preview::new(text)
-        }
+        Ok(text) => Preview::new(highlight::highlighted_text(path, &text, hide_markers)),
         Err(_) => Preview {
             text: dim_text(format!("binary file, {}", human_size(total_size))),
             override_disable_line_numbers: true,

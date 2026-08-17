@@ -5,6 +5,7 @@ mod entry;
 mod entry_preview;
 mod fs;
 mod highlight;
+mod manual;
 mod node_source;
 mod sanitize;
 mod toggle;
@@ -31,6 +32,12 @@ use tokio_stream::StreamExt;
 use app::{App, AppUpdate};
 use cli_error::die;
 use fs::FsSource;
+use manual::ManualSource;
+
+/// Special-cased `path` value that opens the built-in manual instead of a
+/// real directory. Not a real URL scheme — just a token distinct enough
+/// from a real path that it won't collide with one by accident.
+const MANUAL_PATH: &str = "manual://";
 
 const PAGE_SIZE: i32 = 10;
 const HALF_PAGE_SIZE: i32 = PAGE_SIZE / 2;
@@ -39,6 +46,7 @@ const HALF_PAGE_SIZE: i32 = PAGE_SIZE / 2;
 #[command(version, args_override_self = true)]
 struct Cli {
     /// Directory to start browsing from. Defaults to the current directory.
+    /// Pass manual:// instead to open the built-in manual.
     path: Option<String>,
 
     /// Show Nerd Font icons to the left of filenames, in listings and
@@ -199,8 +207,11 @@ async fn run_iotactl() -> io::Result<()> {
     let mouse = cli.mouse && !cli.no_mouse;
 
     let (tx, rx) = mpsc::unbounded_channel::<AppUpdate>();
-    let source: Arc<dyn node_source::NodeSource> =
-        Arc::new(FsSource::new(&path_arg, nerd_font)?);
+    let source: Arc<dyn node_source::NodeSource> = if path_arg == MANUAL_PATH {
+        Arc::new(ManualSource::new(nerd_font))
+    } else {
+        Arc::new(FsSource::new(&path_arg, nerd_font)?)
+    };
     let app = App::new(Vec::new(), source, tx, nerd_font, &toggle_overrides).await;
 
     let mut terminal = setup_terminal(mouse)?;

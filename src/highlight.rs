@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
+
+use crate::sanitize::SanitizedText;
 
 /// Standard tree-sitter highlight-query capture names we look for. Anything
 /// not in this list (including punctuation/operators, left deliberately
@@ -367,11 +369,15 @@ fn build_config(
     config
 }
 
-fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
-    static REGISTRY: OnceLock<HashMap<&'static str, HighlightConfiguration>> = OnceLock::new();
-    REGISTRY.get_or_init(|| {
-        let mut m = HashMap::new();
-        m.insert(
+/// Builds the `HighlightConfiguration` for `name`, alongside the canonical
+/// `&'static str` spelling of that name (always `name` itself here, since
+/// every arm matches a literal — returned separately so [`get_config`] has
+/// a `'static` key to cache under even when its own `name` argument isn't
+/// `'static`, e.g. a language name borrowed from a fenced-code-block info
+/// string). `None` for anything not registered below.
+fn build_language_config(name: &str) -> Option<(&'static str, HighlightConfiguration)> {
+    Some(match name {
+        "rust" => (
             "rust",
             build_config(
                 tree_sitter_rust::LANGUAGE,
@@ -379,8 +385,8 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 tree_sitter_rust::HIGHLIGHTS_QUERY,
                 tree_sitter_rust::INJECTIONS_QUERY,
             ),
-        );
-        m.insert(
+        ),
+        "toml" => (
             "toml",
             build_config(
                 tree_sitter_toml_ng::LANGUAGE,
@@ -388,8 +394,8 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
                 "",
             ),
-        );
-        m.insert(
+        ),
+        "python" => (
             "python",
             build_config(
                 tree_sitter_python::LANGUAGE,
@@ -397,8 +403,8 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 tree_sitter_python::HIGHLIGHTS_QUERY,
                 "",
             ),
-        );
-        m.insert(
+        ),
+        "javascript" => (
             "javascript",
             build_config(
                 tree_sitter_javascript::LANGUAGE,
@@ -406,8 +412,8 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 tree_sitter_javascript::HIGHLIGHT_QUERY,
                 tree_sitter_javascript::INJECTIONS_QUERY,
             ),
-        );
-        m.insert(
+        ),
+        "typescript" => (
             "typescript",
             build_config(
                 tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
@@ -415,8 +421,8 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 tree_sitter_typescript::HIGHLIGHTS_QUERY,
                 "",
             ),
-        );
-        m.insert(
+        ),
+        "tsx" => (
             "tsx",
             build_config(
                 tree_sitter_typescript::LANGUAGE_TSX,
@@ -424,17 +430,12 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 tree_sitter_typescript::HIGHLIGHTS_QUERY,
                 "",
             ),
-        );
-        m.insert(
+        ),
+        "json" => (
             "json",
-            build_config(
-                tree_sitter_json::LANGUAGE,
-                "json",
-                JSON_HIGHLIGHTS_QUERY,
-                "",
-            ),
-        );
-        m.insert(
+            build_config(tree_sitter_json::LANGUAGE, "json", JSON_HIGHLIGHTS_QUERY, ""),
+        ),
+        "yaml" => (
             "yaml",
             build_config(
                 tree_sitter_yaml::LANGUAGE,
@@ -442,35 +443,20 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 tree_sitter_yaml::HIGHLIGHTS_QUERY,
                 "",
             ),
-        );
-        m.insert(
+        ),
+        "c" => (
             "c",
-            build_config(
-                tree_sitter_c::LANGUAGE,
-                "c",
-                tree_sitter_c::HIGHLIGHT_QUERY,
-                "",
-            ),
-        );
-        m.insert(
+            build_config(tree_sitter_c::LANGUAGE, "c", tree_sitter_c::HIGHLIGHT_QUERY, ""),
+        ),
+        "cpp" => (
             "cpp",
-            build_config(
-                tree_sitter_cpp::LANGUAGE,
-                "cpp",
-                tree_sitter_cpp::HIGHLIGHT_QUERY,
-                "",
-            ),
-        );
-        m.insert(
+            build_config(tree_sitter_cpp::LANGUAGE, "cpp", tree_sitter_cpp::HIGHLIGHT_QUERY, ""),
+        ),
+        "go" => (
             "go",
-            build_config(
-                tree_sitter_go::LANGUAGE,
-                "go",
-                tree_sitter_go::HIGHLIGHTS_QUERY,
-                "",
-            ),
-        );
-        m.insert(
+            build_config(tree_sitter_go::LANGUAGE, "go", tree_sitter_go::HIGHLIGHTS_QUERY, ""),
+        ),
+        "html" => (
             "html",
             build_config(
                 tree_sitter_html::LANGUAGE,
@@ -478,26 +464,16 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 tree_sitter_html::HIGHLIGHTS_QUERY,
                 tree_sitter_html::INJECTIONS_QUERY,
             ),
-        );
-        m.insert(
+        ),
+        "css" => (
             "css",
-            build_config(
-                tree_sitter_css::LANGUAGE,
-                "css",
-                tree_sitter_css::HIGHLIGHTS_QUERY,
-                "",
-            ),
-        );
-        m.insert(
+            build_config(tree_sitter_css::LANGUAGE, "css", tree_sitter_css::HIGHLIGHTS_QUERY, ""),
+        ),
+        "bash" => (
             "bash",
-            build_config(
-                tree_sitter_bash::LANGUAGE,
-                "bash",
-                tree_sitter_bash::HIGHLIGHT_QUERY,
-                "",
-            ),
-        );
-        m.insert(
+            build_config(tree_sitter_bash::LANGUAGE, "bash", tree_sitter_bash::HIGHLIGHT_QUERY, ""),
+        ),
+        "java" => (
             "java",
             build_config(
                 tree_sitter_java::LANGUAGE,
@@ -505,8 +481,8 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 tree_sitter_java::HIGHLIGHTS_QUERY,
                 "",
             ),
-        );
-        m.insert(
+        ),
+        "lua" => (
             "lua",
             build_config(
                 tree_sitter_lua::LANGUAGE,
@@ -514,8 +490,8 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 tree_sitter_lua::HIGHLIGHTS_QUERY,
                 tree_sitter_lua::INJECTIONS_QUERY,
             ),
-        );
-        m.insert(
+        ),
+        "ruby" => (
             "ruby",
             build_config(
                 tree_sitter_ruby::LANGUAGE,
@@ -523,7 +499,7 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 tree_sitter_ruby::HIGHLIGHTS_QUERY,
                 "",
             ),
-        );
+        ),
         // `tree-sitter-md` splits markdown into a block grammar (headings,
         // code fences, list markers, links) and a separate inline grammar
         // (bold, italic, inline code spans). Our injections query (see
@@ -535,7 +511,7 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
         // into it — no separate parse pass needed. The same mechanism also
         // picks up fenced-code-block languages and HTML/YAML/TOML
         // injections declared in that query.
-        m.insert(
+        "markdown" => (
             "markdown",
             build_config(
                 tree_sitter_md::LANGUAGE,
@@ -543,8 +519,8 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 MARKDOWN_BLOCK_HIGHLIGHTS_QUERY,
                 MARKDOWN_BLOCK_INJECTIONS_QUERY,
             ),
-        );
-        m.insert(
+        ),
+        "markdown_inline" => (
             "markdown_inline",
             build_config(
                 tree_sitter_md::INLINE_LANGUAGE,
@@ -552,8 +528,8 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 MARKDOWN_INLINE_HIGHLIGHTS_QUERY,
                 tree_sitter_md::INJECTION_QUERY_INLINE,
             ),
-        );
-        m.insert(
+        ),
+        "dockerfile" => (
             "dockerfile",
             build_config(
                 arborium_dockerfile::language(),
@@ -561,9 +537,34 @@ fn registry() -> &'static HashMap<&'static str, HighlightConfiguration> {
                 arborium_dockerfile::HIGHLIGHTS_QUERY,
                 arborium_dockerfile::INJECTIONS_QUERY,
             ),
-        );
-        m
+        ),
+        _ => return None,
     })
+}
+
+/// Looks up the `HighlightConfiguration` for `name`, building (and
+/// leaking, to get the `'static` lifetime every caller needs) only that one
+/// language the first time it's actually requested, rather than eagerly
+/// building all ~20 registered languages up front — building every query is
+/// slow enough (several hundred milliseconds, in practice) that doing it
+/// eagerly on the very first call noticeably delayed that call's caller,
+/// even when most of what it built would go unused for the entire session.
+/// Once built, a language's config is cached here for the process's
+/// lifetime, same as the old eager registry — this only changes *when* the
+/// work happens, not how often.
+fn get_config(name: &str) -> Option<&'static HighlightConfiguration> {
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, &'static HighlightConfiguration>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(config) = cache.get(name) {
+        return Some(*config);
+    }
+    let (canonical_name, config) = build_language_config(name)?;
+    let config: &'static HighlightConfiguration = Box::leak(Box::new(config));
+    cache.insert(canonical_name, config);
+    Some(config)
 }
 
 fn language_for_extension(ext: &str) -> Option<&'static str> {
@@ -677,12 +678,12 @@ fn language_for(path: &Path, text: &str) -> Option<&'static str> {
 /// hiding a marker never leaves a dangling leading gap.
 pub fn highlight(path: &Path, text: &str, hide_markers: bool) -> Option<Vec<Line<'static>>> {
     let lang_name = language_for(path, text)?;
-    let config = registry().get(lang_name).expect("registered above");
+    let config = get_config(lang_name).expect("registered above");
 
     let mut highlighter = Highlighter::new();
     let events = highlighter
         .highlight(config, text.as_bytes(), None, |lang_name| {
-            registry().get(lang_name)
+            get_config(lang_name)
         })
         .ok()?;
 
@@ -751,6 +752,35 @@ pub fn highlight(path: &Path, text: &str, hide_markers: bool) -> Option<Vec<Line
     }
 
     Some(lines.into_iter().map(Line::from).collect())
+}
+
+/// Name of the toggle (see [`crate::toggle::Toggle`]) that controls whether
+/// markdown marker characters (`#`, ```` ``` ````, `*`, ...) show as-is in a
+/// preview (on) or are hidden ("rendered", off, the default) — i.e. this
+/// toggle's value negated is exactly [`highlight`]'s `hide_markers`
+/// parameter. Shared by every source whose preview can contain markdown
+/// (`fs`, for `.md`/`.markdown` files, and `manual`, for every page) so its
+/// name and key can't drift between them.
+pub const RAW_TOGGLE_NAME: &str = "raw";
+pub const RAW_TOGGLE_KEY: char = 'r';
+
+/// Nerd Font glyph/color for a markdown document. Shared so every source
+/// with markdown content — `fs`, for a `.md`/`.markdown` file, and
+/// `manual`, for every page — uses the same glyph instead of each picking
+/// its own.
+pub const MARKDOWN_ICON: (char, Color) = ('\u{e73e}', Color::Rgb(220, 220, 220));
+
+/// Sanitizes `text` and syntax-highlights it based on the language inferred
+/// from `path` (see [`highlight`]), applying `hide_markers` to markdown
+/// marker characters. Falls back to plain sanitized text when `path`'s
+/// language isn't recognized, so callers never need their own fallback
+/// branch for that case.
+pub fn highlighted_text(path: &Path, text: &str, hide_markers: bool) -> SanitizedText {
+    let sanitized = SanitizedText::from_text(text, Style::default());
+    match highlight(path, &sanitized.plain(), hide_markers) {
+        Some(lines) => SanitizedText::assume_sanitized(lines),
+        None => sanitized,
+    }
 }
 
 #[cfg(test)]

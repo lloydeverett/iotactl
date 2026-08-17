@@ -13,6 +13,14 @@ use ratatui::text::{Line, Span};
 use crate::entry::Entry;
 use crate::sanitize::SanitizedText;
 
+/// Nerd Font glyph for a directory-like node (a real filesystem directory,
+/// a manual category, ...), regardless of name. Shared across sources so
+/// every kind of "this node has children" reads the same way, rather than
+/// each source picking its own folder glyph. Has no fixed color of its
+/// own — a source pairs it with `None` for `nerd_icon_color` so it falls
+/// back to whatever color the label text next to it is drawn in.
+pub const FOLDER_ICON: char = '\u{f07b}';
+
 /// Builds the Nerd Font icon prefix span for an entry or window title, or
 /// `None` when `nerd_font` is off (in which case callers add nothing,
 /// rather than reserving icon-sized blank space, so the plain-text UI is
