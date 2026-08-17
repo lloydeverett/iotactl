@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::entry::Entry;
 use crate::node_source::{Cancelled, NodeSource};
+use crate::registry::{self, NodeSourceType};
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 
@@ -50,6 +51,10 @@ pub enum AppUpdate {
 
 pub struct App {
     source: Arc<dyn NodeSource>,
+    /// The type that `source` is an instance of — used to get/set/validate
+    /// toggles, since those now live on `NodeSourceType` rather than on a
+    /// source instance (see its docs).
+    source_type: &'static NodeSourceType,
     update_tx: mpsc::UnboundedSender<AppUpdate>,
 
     /// Bumped before every dispatched background call. Results are tagged
@@ -144,17 +149,17 @@ pub struct App {
     pub toggles_menu_open: bool,
 }
 
-/// Fetches every toggle the source exposes along with its current value.
-/// `NodeSource::get_toggle` is async since a real implementation may need
-/// I/O, so this is only ever done up front and cached — see
-/// `App::source_toggles`.
-async fn load_source_toggles(source: &Arc<dyn NodeSource>) -> Vec<(Toggle, bool)> {
-    let mut toggles = Vec::new();
-    for toggle in source.available_toggles().iter() {
-        let value = source.get_toggle(toggle).await.unwrap_or(false);
-        toggles.push((toggle.clone(), value));
-    }
-    toggles
+/// Fetches every toggle `source_type` exposes along with its current
+/// value. Only ever done up front and cached — see `App::source_toggles`
+/// — even though, unlike before `NodeSourceType::get_toggle` existed,
+/// there'd be nothing wrong with calling it again later; toggle state is
+/// process-global now; see `NodeSourceType`'s docs.
+fn load_source_toggles(source_type: &'static NodeSourceType) -> Vec<(Toggle, bool)> {
+    source_type
+        .toggles
+        .iter()
+        .map(|toggle| (*toggle, source_type.get_toggle(toggle).unwrap_or(false)))
+        .collect()
 }
 
 /// How long an error toast stays on screen before it's cleared.
@@ -176,15 +181,24 @@ impl App {
     /// is just applied in turn and the last write wins. This only seeds the
     /// initial value; every toggle can still be flipped normally afterwards
     /// from within the TUI. Matches against the ambient toggles ("wrap",
-    /// "numbers", "zoom") first, then whatever the source exposes.
+    /// "numbers", "zoom") first, then whatever `source_type` exposes.
+    ///
+    /// A name that's neither ambient nor exposed by `source_type` doesn't
+    /// fail startup by itself: it's only an error if it's unrecognized
+    /// *everywhere*, i.e. no known node source type (see
+    /// `registry::toggle_known`) exposes a toggle by that name. Otherwise
+    /// it's silently ignored — e.g. `--toggle-on meta` while browsing the
+    /// manual rather than the filesystem is harmless, since `meta` is a
+    /// real toggle, just not one this source has.
     pub async fn new(
         start: Vec<String>,
         source: Arc<dyn NodeSource>,
+        source_type: &'static NodeSourceType,
         update_tx: mpsc::UnboundedSender<AppUpdate>,
         toggle_overrides: &[(String, bool)],
     ) -> Self {
         let root_entry = source.root_entry().await;
-        let mut source_toggles = load_source_toggles(&source).await;
+        let mut source_toggles = load_source_toggles(source_type);
         let mut wrap_preview = false;
         let mut show_line_numbers = false;
         let mut zoom_preview = false;
@@ -194,24 +208,33 @@ impl App {
                 "wrap" => wrap_preview = *value,
                 "numbers" => show_line_numbers = *value,
                 "zoom" => zoom_preview = *value,
-                _ => {
-                    let Some(idx) = source_toggles.iter().position(|(t, _)| &t.name == name)
-                    else {
-                        let mut valid = vec!["wrap".to_string(), "numbers".to_string(), "zoom".to_string()];
-                        valid.extend(source_toggles.iter().map(|(t, _)| t.name.clone()));
+                _ => match source_toggles.iter().position(|(t, _)| t.name == name.as_str()) {
+                    Some(idx) => {
+                        source_toggles[idx].1 = *value;
+                        let _ = source_type.set_toggle(&source_toggles[idx].0, *value);
+                    }
+                    None if !registry::toggle_known(name) => {
+                        let mut valid: Vec<&str> = vec!["wrap", "numbers", "zoom"];
+                        valid.extend(
+                            registry::NODE_SOURCE_TYPES
+                                .iter()
+                                .flat_map(|t| t.toggles.iter().map(|tg| tg.name)),
+                        );
+                        valid.sort_unstable();
+                        valid.dedup();
                         crate::cli_error::die(format!(
                             "unknown toggle {name:?} (valid toggles: {})",
                             valid.join(", ")
                         ));
-                    };
-                    source_toggles[idx].1 = *value;
-                    let _ = source.set_toggle(&source_toggles[idx].0, *value).await;
-                }
+                    }
+                    None => {}
+                },
             }
         }
 
         let mut app = App {
             source,
+            source_type,
             update_tx,
             epoch: 0,
             root_entry,
@@ -785,7 +808,8 @@ impl App {
         };
         let value = !self.source_toggles[idx].1;
         self.source_toggles[idx].1 = value;
-        let toggle = self.source_toggles[idx].0.clone();
+        let toggle = self.source_toggles[idx].0;
+        let _ = self.source_type.set_toggle(&toggle, value);
 
         self.epoch += 1;
         let epoch = self.epoch;
@@ -794,7 +818,6 @@ impl App {
         let tx = self.update_tx.clone();
 
         tokio::spawn(async move {
-            let _ = source.set_toggle(&toggle, value).await;
             let mut results = Vec::with_capacity(ids.len());
             for id in ids {
                 let result = source.read_dir(&id).await;

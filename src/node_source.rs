@@ -9,7 +9,6 @@ use tokio::io::AsyncRead;
 use crate::command::Command;
 use crate::entry::Entry;
 use crate::sanitize::SanitizedText;
-use crate::toggle::Toggle;
 
 /// A cheap, cloneable "has this call been superseded?" signal passed into
 /// [`NodeSource::preview_tui`]. The caller (`App`) flips it via `cancel()`
@@ -166,20 +165,6 @@ pub trait NodeSource: Send + Sync {
     /// its size limit — since there's no rendering to do and nothing here
     /// needs to fit in memory all at once. Not yet invoked anywhere.
     async fn open(&self, id: &[String]) -> io::Result<ByteStream>;
-
-    /// The commands this source makes available, independent of any
-    /// particular node. Not yet invoked anywhere.
-    fn available_commands(&self) -> Arc<[Command]>;
-
-    /// The toggles this source makes available, independent of any
-    /// particular node. Not yet invoked anywhere.
-    fn available_toggles(&self) -> Arc<[Toggle]>;
-
-    /// Sets `toggle` to `value`. Not yet invoked anywhere.
-    async fn set_toggle(&self, toggle: &Toggle, value: bool) -> io::Result<()>;
-
-    /// Reads the current value of `toggle`. Not yet invoked anywhere.
-    async fn get_toggle(&self, toggle: &Toggle) -> io::Result<bool>;
 
     /// Runs `command` with `args`. Not yet invoked anywhere.
     async fn execute_command(&self, command: &Command, args: &[String]) -> io::Result<()>;

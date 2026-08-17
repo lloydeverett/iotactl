@@ -32,8 +32,52 @@ use crate::entry_preview;
 use crate::highlight;
 use crate::node_source::{ByteStream, Cancelled, ManualPage, NodeSource, Preview};
 use crate::registry;
+use crate::registry::NodeSourceType;
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
+
+/// Backing state for [`highlight::RAW_TOGGLE_NAME`], the manual's only
+/// toggle. Process-global rather than a field on `ManualSource` since only
+/// one source is ever in use at a time — see [`NodeSourceType`]'s docs for
+/// why that lets get/set live on the type instead of on a source instance.
+static RAW_MARKDOWN: AtomicBool = AtomicBool::new(false);
+
+/// This type's contribution to [`crate::registry::NODE_SOURCE_TYPES`].
+pub static NODE_SOURCE_TYPE: NodeSourceType = NodeSourceType {
+    // A prefix, not just an exact match: anything after it addresses a
+    // page within the manual (e.g. `manual://filesystem`), split on `/`
+    // into an id — the same shape `find_page` walks for ordinary in-app
+    // navigation. Empty for bare `manual://`, meaning "start at the top".
+    schemes: &["manual://"],
+    manual_page: None,
+    commands: &[],
+    toggles: &[Toggle {
+        name: highlight::RAW_TOGGLE_NAME,
+        key: highlight::RAW_TOGGLE_KEY,
+    }],
+    construct_fn: |rest| Ok(Arc::new(ManualSource::new(registry::split_id(rest))?)),
+    set_toggle_fn: |toggle, value| {
+        if toggle.name == highlight::RAW_TOGGLE_NAME {
+            RAW_MARKDOWN.store(value, Ordering::SeqCst);
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("the manual has no toggle named {:?}", toggle.name),
+            ))
+        }
+    },
+    get_toggle_fn: |toggle| {
+        if toggle.name == highlight::RAW_TOGGLE_NAME {
+            Ok(RAW_MARKDOWN.load(Ordering::SeqCst))
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("the manual has no toggle named {:?}", toggle.name),
+            ))
+        }
+    },
+};
 
 /// A synthetic filename handed to [`highlight::highlighted_text`] purely so
 /// it infers "markdown" as the language — every manual page's `body` is
@@ -320,16 +364,6 @@ pub struct ManualSource {
     /// `manual://` case (scoped at the tree's own top level); e.g.
     /// `["filesystem"]` for `manual://filesystem`.
     root: Vec<String>,
-    /// Whether a leaf page's preview shows its markdown marks as-is (`true`)
-    /// or rendered/hidden (`false`, the default) — see
-    /// `crate::highlight::RAW_TOGGLE_NAME`. Not shared via `Arc` like `fs`'s
-    /// toggle state: `ManualSource` is never cloned, since its
-    /// `spawn_blocking`'d work (see `preview_tui`) only ever needs the two
-    /// `Copy` values that work actually depends on (the toggle's current
-    /// value, read here with `&self` before dispatch, and the page's
-    /// `&'static str` body), not a clone of the whole source the way `fs`
-    /// needs for its blocking closures to have owned access to `self`.
-    raw_markdown: AtomicBool,
 }
 
 impl ManualSource {
@@ -341,10 +375,7 @@ impl ManualSource {
     /// directory the same way.
     pub fn new(root: Vec<String>) -> io::Result<Self> {
         find_page(&root).ok_or_else(|| no_such_page(&root))?;
-        Ok(ManualSource {
-            root,
-            raw_markdown: AtomicBool::new(false),
-        })
+        Ok(ManualSource { root })
     }
 
     /// Resolves a relative `id` (as given to any `NodeSource` method) to
@@ -390,7 +421,7 @@ impl NodeSource for ManualSource {
             // (a `&'static str` and a `bool`), so there's no need to clone
             // `self` into the closure the way `fs` clones its whole source —
             // only the two values the blocking work actually needs move in.
-            let hide_markers = !self.raw_markdown.load(Ordering::SeqCst);
+            let hide_markers = !RAW_MARKDOWN.load(Ordering::SeqCst);
             let body = page.body;
             tokio::task::spawn_blocking(move || {
                 Preview::new(highlight::highlighted_text(
@@ -421,40 +452,6 @@ impl NodeSource for ManualSource {
         // just satisfies `NodeSource::open`'s interface the same way `fs`'s
         // real, incremental file stream does.
         Ok(Box::pin(std::io::Cursor::new(page.body.as_bytes())))
-    }
-
-    fn available_commands(&self) -> Arc<[Command]> {
-        Arc::from(Vec::new())
-    }
-
-    fn available_toggles(&self) -> Arc<[Toggle]> {
-        Arc::from(vec![Toggle {
-            name: highlight::RAW_TOGGLE_NAME.to_string(),
-            key: highlight::RAW_TOGGLE_KEY,
-        }])
-    }
-
-    async fn set_toggle(&self, toggle: &Toggle, value: bool) -> io::Result<()> {
-        if toggle.name == highlight::RAW_TOGGLE_NAME {
-            self.raw_markdown.store(value, Ordering::SeqCst);
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("the manual has no toggle named {:?}", toggle.name),
-            ))
-        }
-    }
-
-    async fn get_toggle(&self, toggle: &Toggle) -> io::Result<bool> {
-        if toggle.name == highlight::RAW_TOGGLE_NAME {
-            Ok(self.raw_markdown.load(Ordering::SeqCst))
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("the manual has no toggle named {:?}", toggle.name),
-            ))
-        }
     }
 
     async fn execute_command(&self, command: &Command, _args: &[String]) -> io::Result<()> {

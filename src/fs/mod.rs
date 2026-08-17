@@ -14,6 +14,7 @@ use crate::entry::Entry;
 use crate::entry_preview;
 use crate::highlight;
 use crate::node_source::{ByteStream, Cancelled, NodeSource, Preview};
+use crate::registry::NodeSourceType;
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 
@@ -21,18 +22,93 @@ pub mod docs;
 
 const PREVIEW_READ_LIMIT: usize = 64 * 1024;
 
-/// Name of the toggle, exposed via `available_toggles`, that controls
-/// whether dotfile entries are included in listings. Filesystems are the
-/// only kind of source where "hidden" is a meaningful concept at all, so
-/// it's owned entirely here rather than threaded through `NodeSource` as a
-/// parameter.
+/// Name of the toggle, exposed via [`NODE_SOURCE_TYPE`]'s `toggles`, that
+/// controls whether dotfile entries are included in listings. Filesystems
+/// are the only kind of source where "hidden" is a meaningful concept at
+/// all, so it's owned entirely here rather than threaded through
+/// `NodeSource` as a parameter.
 const HIDDEN_TOGGLE_NAME: &str = "hidden";
 
-/// Name of the toggle, exposed via `available_toggles`, that controls
-/// whether the preview shows the selected node's metadata (size,
+/// Name of the toggle, exposed via [`NODE_SOURCE_TYPE`]'s `toggles`, that
+/// controls whether the preview shows the selected node's metadata (size,
 /// permissions, timestamps, ...) instead of its normal contents (file text
 /// or directory listing). Off by default.
 const META_TOGGLE_NAME: &str = "meta";
+
+/// Backing state for [`HIDDEN_TOGGLE_NAME`], [`highlight::RAW_TOGGLE_NAME`],
+/// and [`META_TOGGLE_NAME`]. Process-global rather than a field on
+/// `FsSource` since only one source is ever in use at a time — see
+/// [`NodeSourceType`]'s docs for why that lets get/set live on the type
+/// instead of on a source instance. `AtomicBool` still earns its keep here
+/// over a plain `bool` behind a lock: it's read on every `read_dir`/
+/// `preview_tui` call (including from inside a `spawn_blocking` closure)
+/// and written on every toggle flip, and needs no more than that.
+static SHOW_HIDDEN: AtomicBool = AtomicBool::new(false);
+/// Defaults to `false`: markdown markers are hidden (i.e. "rendered") by
+/// default. See [`SHOW_HIDDEN`].
+static RAW_MARKDOWN: AtomicBool = AtomicBool::new(false);
+/// Defaults to `false`: the preview shows content, not metadata. See
+/// [`SHOW_HIDDEN`].
+static SHOW_META: AtomicBool = AtomicBool::new(false);
+
+/// This type's contribution to [`crate::registry::NODE_SOURCE_TYPES`].
+pub static NODE_SOURCE_TYPE: NodeSourceType = NodeSourceType {
+    // Optional: a path with no recognized scheme at all also selects this
+    // type (see `registry::create`'s fallback), so this only matters for a
+    // path that would otherwise be ambiguous. Consumed whole as the real
+    // filesystem path to browse, unlike the manual scheme — never split
+    // into an id, since the given path already picks out exactly one node
+    // (no separate "start" needed).
+    schemes: &["file://"],
+    manual_page: Some(&docs::MANUAL_PAGE),
+    commands: &[],
+    toggles: &[
+        Toggle {
+            name: HIDDEN_TOGGLE_NAME,
+            key: 'H',
+        },
+        Toggle {
+            name: highlight::RAW_TOGGLE_NAME,
+            key: highlight::RAW_TOGGLE_KEY,
+        },
+        Toggle {
+            name: META_TOGGLE_NAME,
+            key: 'm',
+        },
+    ],
+    construct_fn: |rest| Ok(Arc::new(FsSource::new(rest)?)),
+    set_toggle_fn: |toggle, value| {
+        if toggle.name == HIDDEN_TOGGLE_NAME {
+            SHOW_HIDDEN.store(value, Ordering::SeqCst);
+            Ok(())
+        } else if toggle.name == highlight::RAW_TOGGLE_NAME {
+            RAW_MARKDOWN.store(value, Ordering::SeqCst);
+            Ok(())
+        } else if toggle.name == META_TOGGLE_NAME {
+            SHOW_META.store(value, Ordering::SeqCst);
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("the filesystem source has no toggle named {:?}", toggle.name),
+            ))
+        }
+    },
+    get_toggle_fn: |toggle| {
+        if toggle.name == HIDDEN_TOGGLE_NAME {
+            Ok(SHOW_HIDDEN.load(Ordering::SeqCst))
+        } else if toggle.name == highlight::RAW_TOGGLE_NAME {
+            Ok(RAW_MARKDOWN.load(Ordering::SeqCst))
+        } else if toggle.name == META_TOGGLE_NAME {
+            Ok(SHOW_META.load(Ordering::SeqCst))
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("the filesystem source has no toggle named {:?}", toggle.name),
+            ))
+        }
+    },
+};
 
 /// Nerd Font glyph/color for a file whose type isn't recognized by
 /// [`file_icon`]. Kept distinct from other icons so an unrecognized file
@@ -142,16 +218,6 @@ pub fn human_size(bytes: u64) -> String {
 #[derive(Clone)]
 pub struct FsSource {
     root: PathBuf,
-    /// Shared (not per-clone) so every `FsSource` handle backed by the same
-    /// root sees the same toggle state, since `read_dir`/`preview_tui` clone
-    /// `self` into a blocking task on every call.
-    show_hidden: Arc<AtomicBool>,
-    /// Same sharing rationale as `show_hidden`. Defaults to `false`: markdown
-    /// markers are hidden (i.e. "rendered") by default.
-    raw_markdown: Arc<AtomicBool>,
-    /// Same sharing rationale as `show_hidden`. Defaults to `false`: the
-    /// preview shows content, not metadata.
-    show_meta: Arc<AtomicBool>,
 }
 
 impl FsSource {
@@ -162,12 +228,7 @@ impl FsSource {
     pub fn new(root: &str) -> io::Result<Self> {
         let root =
             fs::canonicalize(root).map_err(|e| io::Error::new(e.kind(), format!("{root}: {e}")))?;
-        Ok(FsSource {
-            root,
-            show_hidden: Arc::new(AtomicBool::new(false)),
-            raw_markdown: Arc::new(AtomicBool::new(false)),
-            show_meta: Arc::new(AtomicBool::new(false)),
-        })
+        Ok(FsSource { root })
     }
 
     /// Resolves `id` to a real path under `root`, rejecting any segment
@@ -208,7 +269,7 @@ impl FsSource {
     /// signal to wire up yet).
     fn read_dir_sync(&self, id: &[String], cancelled: &Cancelled) -> io::Result<Vec<Entry>> {
         let path = self.path_from_segments(id)?;
-        let show_hidden = self.show_hidden.load(Ordering::SeqCst);
+        let show_hidden = SHOW_HIDDEN.load(Ordering::SeqCst);
         let mut entries = Vec::new();
         // Shared by every entry from this listing rather than allocated per
         // entry, since FsSource currently exposes the same (empty) set of
@@ -266,7 +327,7 @@ impl FsSource {
             Ok(path) => path,
             Err(e) => return Preview::new(error_text(e.to_string())),
         };
-        if self.show_meta.load(Ordering::SeqCst) {
+        if SHOW_META.load(Ordering::SeqCst) {
             return Preview {
                 text: preview_meta(&path),
                 override_disable_line_numbers: true,
@@ -280,7 +341,7 @@ impl FsSource {
                 },
                 Err(e) => Preview::new(error_text(e.to_string())),
             },
-            Ok(_) => preview_file(&path, !self.raw_markdown.load(Ordering::SeqCst)),
+            Ok(_) => preview_file(&path, !RAW_MARKDOWN.load(Ordering::SeqCst)),
             Err(e) => Preview::new(error_text(e.to_string())),
         }
     }
@@ -335,60 +396,6 @@ impl NodeSource for FsSource {
         // `std::fs`-based work.
         let file = tokio::fs::File::open(path).await?;
         Ok(Box::pin(file))
-    }
-
-    fn available_commands(&self) -> Arc<[Command]> {
-        Arc::from(Vec::new())
-    }
-
-    fn available_toggles(&self) -> Arc<[Toggle]> {
-        Arc::from(vec![
-            Toggle {
-                name: HIDDEN_TOGGLE_NAME.to_string(),
-                key: 'H',
-            },
-            Toggle {
-                name: highlight::RAW_TOGGLE_NAME.to_string(),
-                key: highlight::RAW_TOGGLE_KEY,
-            },
-            Toggle {
-                name: META_TOGGLE_NAME.to_string(),
-                key: 'm',
-            },
-        ])
-    }
-
-    async fn set_toggle(&self, toggle: &Toggle, value: bool) -> io::Result<()> {
-        if toggle.name == HIDDEN_TOGGLE_NAME {
-            self.show_hidden.store(value, Ordering::SeqCst);
-            Ok(())
-        } else if toggle.name == highlight::RAW_TOGGLE_NAME {
-            self.raw_markdown.store(value, Ordering::SeqCst);
-            Ok(())
-        } else if toggle.name == META_TOGGLE_NAME {
-            self.show_meta.store(value, Ordering::SeqCst);
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("FsSource has no toggle named {:?}", toggle.name),
-            ))
-        }
-    }
-
-    async fn get_toggle(&self, toggle: &Toggle) -> io::Result<bool> {
-        if toggle.name == HIDDEN_TOGGLE_NAME {
-            Ok(self.show_hidden.load(Ordering::SeqCst))
-        } else if toggle.name == highlight::RAW_TOGGLE_NAME {
-            Ok(self.raw_markdown.load(Ordering::SeqCst))
-        } else if toggle.name == META_TOGGLE_NAME {
-            Ok(self.show_meta.load(Ordering::SeqCst))
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("FsSource has no toggle named {:?}", toggle.name),
-            ))
-        }
     }
 
     async fn execute_command(&self, command: &Command, _args: &[String]) -> io::Result<()> {
