@@ -1,7 +1,7 @@
 //! The interface [`FsSource`](super::FsSource) uses for every operation
 //! that would otherwise be a direct `std::fs`/`tokio::fs` call: listing a
 //! directory, reading metadata, following a symlink, reading a file's
-//! bytes. `FsSource` itself holds only an `Arc<dyn FsVTable>` and never
+//! bytes. `FsSource` itself holds only an `Arc<dyn Vfs>` and never
 //! touches `std::fs` directly (see `super::real` for the one implementation
 //! that does) — the rest of `fs`'s code (hidden-file filtering, icon
 //! lookup, sorting, the meta/raw preview toggles) is policy that applies
@@ -13,7 +13,7 @@
 //!
 //! Every method here mirrors a real filesystem primitive closely enough
 //! that a real-fs-backed implementation is a thin wrapper (see
-//! `super::real::RealFsVTable`), but returns this module's own
+//! `super::real::RealVfs`), but returns this module's own
 //! [`Metadata`]/[`DirEntryInfo`] rather than `std::fs`'s types, since those
 //! are tied to an actual `Metadata`/`DirEntry` on a real inode and couldn't
 //! be constructed by a source with no real filesystem underneath it.
@@ -40,8 +40,8 @@ pub struct UnixMetadata {
 
 /// A backend-agnostic stand-in for `std::fs::Metadata`, covering every
 /// field `fs` actually reads from one (see `preview_meta` and
-/// `preview_tui_sync` in `super`). Returned by both [`FsVTable::metadata`]
-/// (follows a symlink) and [`FsVTable::symlink_metadata`] (does not),
+/// `preview_tui_sync` in `super`). Returned by both [`Vfs::metadata`]
+/// (follows a symlink) and [`Vfs::symlink_metadata`] (does not),
 /// mirroring `stat`/`lstat`.
 #[derive(Clone, Debug)]
 pub struct Metadata {
@@ -57,7 +57,7 @@ pub struct Metadata {
     pub unix: Option<UnixMetadata>,
 }
 
-/// One entry from [`FsVTable::read_dir`]: just enough to build an
+/// One entry from [`Vfs::read_dir`]: just enough to build an
 /// [`crate::entry::Entry`] (name, whether it's a directory, whether it's a
 /// symlink) without handing back a full [`Metadata`] per entry, since
 /// `read_dir` is called for every listing (including the directory-preview
@@ -75,17 +75,17 @@ pub struct DirEntryInfo {
 /// can be pointed at something other than the real, local filesystem in
 /// the future (the motivating example being a zip archive: browsable and
 /// previewable the same way a directory tree is, without extracting it to
-/// disk first). [`super::real::RealFsVTable`] is the only implementation
+/// disk first). [`super::real::RealVfs`] is the only implementation
 /// today, and is what `FsSource::new` uses by default; a hypothetical
-/// zip-backed one would go through `FsSource::with_vtable` instead.
+/// zip-backed one would go through `FsSource::with_vfs` instead.
 ///
 /// Every method takes a `Path` scoped by the caller (see
-/// `FsSource::path_from_segments`) — a `FsVTable` implementation has no
+/// `FsSource::path_from_segments`) — a `Vfs` implementation has no
 /// opinion of its own about a "root" or about which paths are valid; it
 /// just answers questions about whatever path it's given, the same way
 /// `std::fs`'s free functions do.
 ///
-/// All methods but [`open`](FsVTable::open) are synchronous and are always
+/// All methods but [`open`](Vfs::open) are synchronous and are always
 /// called from inside a [`tokio::task::spawn_blocking`] closure by
 /// `FsSource` (see `node_source::NodeSource`'s trait docs for why) — an
 /// implementation doesn't need to worry about blocking the async runtime
@@ -93,7 +93,7 @@ pub struct DirEntryInfo {
 /// reads from incrementally rather than a value computed once; see that
 /// method's docs.
 #[async_trait]
-pub trait FsVTable: Send + Sync {
+pub trait Vfs: Send + Sync {
     /// Resolves `path` to an absolute, symlink-free form, the way
     /// `std::fs::canonicalize` does. Used only once, by `FsSource::new`, to
     /// pin down the root a source is scoped to.
@@ -124,14 +124,14 @@ pub trait FsVTable: Send + Sync {
     /// Reads up to `limit` bytes from the start of the file at `path`,
     /// however many are available (short of `limit` at EOF). Used for a
     /// bounded preview read, never the file's full contents — see
-    /// `NodeSource::open`/[`FsVTable::open`] for that.
+    /// `NodeSource::open`/[`Vfs::open`] for that.
     fn read_prefix(&self, path: &Path, limit: usize) -> io::Result<Vec<u8>>;
 
     /// Opens `path` for streaming, unbounded access to its raw bytes,
     /// backing `NodeSource::open`. Async (unlike every other method here)
     /// because the caller wants to read the result incrementally rather
     /// than wait for it to be read into memory all at once — see
-    /// [`ByteStream`]'s docs. `super::real::RealFsVTable`'s implementation
+    /// [`ByteStream`]'s docs. `super::real::RealVfs`'s implementation
     /// is safe to call directly from async code (it's backed by
     /// `tokio::fs::File`, which already keeps blocking syscalls off the
     /// async runtime's own threads); an implementation backed by something

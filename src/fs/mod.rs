@@ -19,10 +19,10 @@ use crate::toggle::Toggle;
 
 pub mod docs;
 pub mod real;
-pub mod vtable;
+pub mod vfs;
 
-use real::RealFsVTable;
-use vtable::FsVTable;
+use real::RealVfs;
+use vfs::Vfs;
 
 const PREVIEW_READ_LIMIT: usize = 64 * 1024;
 
@@ -215,7 +215,7 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-/// A `NodeSource` backed by an [`FsVTable`] — the real, local filesystem by
+/// A `NodeSource` backed by an [`Vfs`] — the real, local filesystem by
 /// default (see [`FsSource::new`]), but any implementation of that trait —
 /// rooted at a fixed directory. Node ids are segments relative to that
 /// root, so the root itself is addressed as `id == []` and callers can
@@ -224,30 +224,30 @@ pub fn human_size(bytes: u64) -> String {
 #[derive(Clone)]
 pub struct FsSource {
     root: PathBuf,
-    vtable: Arc<dyn FsVTable>,
+    vfs: Arc<dyn Vfs>,
 }
 
 impl FsSource {
     /// Builds a source backed by the real, local filesystem — see
-    /// [`FsSource::with_vtable`] for one backed by anything else.
+    /// [`FsSource::with_vfs`] for one backed by anything else.
     ///
     /// Resolves `root` (e.g. a CLI-supplied path) to an absolute, symlink-free
     /// directory the source will be scoped to. Errors carry `root` itself so
     /// callers can report e.g. `"some/bad/path: No such file or directory"`
     /// without needing to know this is backed by the filesystem.
     pub fn new(root: &str) -> io::Result<Self> {
-        Self::with_vtable(root, Arc::new(RealFsVTable))
+        Self::with_vfs(root, Arc::new(RealVfs))
     }
 
-    /// Builds a source backed by `vtable` — any implementation of
-    /// [`FsVTable`], not necessarily the real filesystem (e.g. a zip
+    /// Builds a source backed by `vfs` — any implementation of
+    /// [`Vfs`], not necessarily the real filesystem (e.g. a zip
     /// archive's contents, addressed the same way a directory tree would
     /// be). See [`FsSource::new`] for the common case.
-    pub fn with_vtable(root: &str, vtable: Arc<dyn FsVTable>) -> io::Result<Self> {
-        let root = vtable
+    pub fn with_vfs(root: &str, vfs: Arc<dyn Vfs>) -> io::Result<Self> {
+        let root = vfs
             .canonicalize(Path::new(root))
             .map_err(|e| io::Error::new(e.kind(), format!("{root}: {e}")))?;
-        Ok(FsSource { root, vtable })
+        Ok(FsSource { root, vfs })
     }
 
     /// Resolves `id` to a real path under `root`, rejecting any segment
@@ -279,8 +279,8 @@ impl FsSource {
         Ok(path)
     }
 
-    /// `cancelled` is forwarded to `self.vtable.read_dir`, which (for
-    /// `RealFsVTable`) checks it once per entry: cheap relative to the
+    /// `cancelled` is forwarded to `self.vfs.read_dir`, which (for
+    /// `RealVfs`) checks it once per entry: cheap relative to the
     /// syscalls each iteration already does, and lets a scan of a huge
     /// directory bail out promptly once its result is known to be moot (see
     /// `preview_tui_sync`'s directory-preview branch, the only caller that
@@ -296,7 +296,7 @@ impl FsSource {
         // commands on every node.
         let suggested_commands: Arc<[Command]> = Arc::from(Vec::new());
 
-        for raw in self.vtable.read_dir(&path, cancelled)? {
+        for raw in self.vfs.read_dir(&path, cancelled)? {
             if !show_hidden && raw.name.starts_with('.') {
                 continue;
             }
@@ -332,11 +332,11 @@ impl FsSource {
         };
         if SHOW_META.load(Ordering::SeqCst) {
             return Preview {
-                text: preview_meta(self.vtable.as_ref(), &path),
+                text: preview_meta(self.vfs.as_ref(), &path),
                 override_disable_line_numbers: true,
             };
         }
-        match self.vtable.metadata(&path) {
+        match self.vfs.metadata(&path) {
             Ok(meta) if meta.is_dir => match self.read_dir_sync(id, cancelled) {
                 Ok(entries) => Preview {
                     text: entry_preview::format_dir_preview(&entries),
@@ -344,7 +344,7 @@ impl FsSource {
                 },
                 Err(e) => Preview::new(error_text(e.to_string())),
             },
-            Ok(_) => preview_file(self.vtable.as_ref(), &path, !RAW_MARKDOWN.load(Ordering::SeqCst)),
+            Ok(_) => preview_file(self.vfs.as_ref(), &path, !RAW_MARKDOWN.load(Ordering::SeqCst)),
             Err(e) => Preview::new(error_text(e.to_string())),
         }
     }
@@ -392,7 +392,7 @@ impl NodeSource for FsSource {
 
     async fn open(&self, id: &[String]) -> io::Result<ByteStream> {
         let path = self.path_from_segments(id)?;
-        self.vtable.open(&path).await
+        self.vfs.open(&path).await
     }
 
     async fn execute_command(&self, command: &Command, _args: &[String]) -> io::Result<()> {
@@ -411,10 +411,10 @@ fn dim_text(msg: String) -> SanitizedText {
     SanitizedText::from_text(&msg, Style::default().fg(Color::DarkGray))
 }
 
-fn preview_file(vtable: &dyn FsVTable, path: &Path, hide_markers: bool) -> Preview {
-    let total_size = vtable.metadata(path).map(|m| m.len).unwrap_or(0);
+fn preview_file(vfs: &dyn Vfs, path: &Path, hide_markers: bool) -> Preview {
+    let total_size = vfs.metadata(path).map(|m| m.len).unwrap_or(0);
 
-    let buf = match vtable.read_prefix(path, PREVIEW_READ_LIMIT) {
+    let buf = match vfs.read_prefix(path, PREVIEW_READ_LIMIT) {
         Ok(buf) => buf,
         Err(e) => return Preview::new(error_text(e.to_string())),
     };
@@ -507,10 +507,10 @@ fn format_time(time: SystemTime) -> String {
 /// Builds the "meta" toggle's preview: a `key: value` listing of the
 /// selected node's metadata rather than its normal contents. Applies
 /// uniformly to files and directories, since both have this information.
-fn preview_meta(vtable: &dyn FsVTable, path: &Path) -> SanitizedText {
+fn preview_meta(vfs: &dyn Vfs, path: &Path) -> SanitizedText {
     // `symlink_metadata` (lstat) rather than `metadata` (stat) so a symlink
     // is detected as one instead of transparently resolved.
-    let link_meta = match vtable.symlink_metadata(path) {
+    let link_meta = match vfs.symlink_metadata(path) {
         Ok(m) => m,
         Err(e) => return error_text(e.to_string()),
     };
@@ -520,7 +520,7 @@ fn preview_meta(vtable: &dyn FsVTable, path: &Path) -> SanitizedText {
     // permissions) like `stat` does, but fall back to the link's own
     // metadata for a broken link rather than erroring out entirely.
     let (meta, broken_link) = if is_link {
-        match vtable.metadata(path) {
+        match vfs.metadata(path) {
             Ok(resolved) => (resolved, false),
             Err(_) => (link_meta.clone(), true),
         }
@@ -542,7 +542,7 @@ fn preview_meta(vtable: &dyn FsVTable, path: &Path) -> SanitizedText {
     ));
 
     let type_desc = if is_link {
-        match vtable.read_link(path) {
+        match vfs.read_link(path) {
             Ok(target) => {
                 let target = target.to_string_lossy().to_string();
                 if broken_link {
@@ -572,7 +572,7 @@ fn preview_meta(vtable: &dyn FsVTable, path: &Path) -> SanitizedText {
     lines.push(meta_line("Type", type_desc, type_style));
 
     if meta.is_dir {
-        if let Ok(count) = vtable.read_dir(path, &Cancelled::new()).map(|v| v.len()) {
+        if let Ok(count) = vfs.read_dir(path, &Cancelled::new()).map(|v| v.len()) {
             lines.push(meta_line("Entries", count.to_string(), Style::default()));
         }
     } else {
@@ -584,7 +584,7 @@ fn preview_meta(vtable: &dyn FsVTable, path: &Path) -> SanitizedText {
     }
 
     // `unix` is `None` on a non-Unix platform, or for a backend with
-    // nothing sensible to report here — see `vtable::UnixMetadata`.
+    // nothing sensible to report here — see `vfs::UnixMetadata`.
     if let Some(unix) = meta.unix {
         lines.push(meta_line(
             "Permissions",

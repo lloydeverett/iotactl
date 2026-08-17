@@ -1,8 +1,8 @@
-//! The one [`FsVTable`] implementation that exists today: every method
+//! The one [`Vfs`] implementation that exists today: every method
 //! backed by a real `std::fs`/`tokio::fs` call against the local
-//! filesystem. Kept separate from `vtable`'s trait definition, and from
+//! filesystem. Kept separate from `vfs`'s trait definition, and from
 //! `super`'s browsing/preview logic, so both stay entirely free of real
-//! I/O — see `vtable`'s module docs for why that separation is the point.
+//! I/O — see `vfs`'s module docs for why that separation is the point.
 
 use std::fs;
 use std::io::{self, Read};
@@ -12,14 +12,14 @@ use async_trait::async_trait;
 
 use crate::node_source::{ByteStream, Cancelled};
 
-use super::vtable::{DirEntryInfo, FsVTable, Metadata, UnixMetadata};
+use super::vfs::{DirEntryInfo, Vfs, Metadata, UnixMetadata};
 
 /// See the module docs.
-pub struct RealFsVTable;
+pub struct RealVfs;
 
 /// Converts a real `std::fs::Metadata` into this module's backend-agnostic
-/// [`Metadata`]. Shared by [`FsVTable::metadata`] and
-/// [`FsVTable::symlink_metadata`] below, which differ only in whether the
+/// [`Metadata`]. Shared by [`Vfs::metadata`] and
+/// [`Vfs::symlink_metadata`] below, which differ only in whether the
 /// `std::fs::Metadata` they hand in already followed a symlink.
 fn convert_metadata(meta: fs::Metadata) -> Metadata {
     #[cfg(unix)]
@@ -47,7 +47,7 @@ fn convert_metadata(meta: fs::Metadata) -> Metadata {
 }
 
 #[async_trait]
-impl FsVTable for RealFsVTable {
+impl Vfs for RealVfs {
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
         fs::canonicalize(path)
     }
