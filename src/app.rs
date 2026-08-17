@@ -244,18 +244,33 @@ impl App {
             toggles_menu_open: false,
         };
 
-        // Nothing else is running yet, so the initial load can be awaited
-        // directly instead of going through the dispatch/channel machinery.
+        // The root column's listing is awaited directly rather than going
+        // through the dispatch/channel machinery: unlike every other column,
+        // it has no parent to fall back to if the load fails or comes back
+        // empty (see `fail_column_load`'s doc comment), so `App::new` needs
+        // its result up front to build the one column that's always
+        // guaranteed to exist. `column_from_result` handles the error case
+        // by producing a column with no entries and a toast, rather than by
+        // popping a nonexistent parent — see `ColumnLoaded`'s alternative
+        // handling in `apply_update` for the contrast.
+        //
+        // The initial preview is a different story: nothing structural
+        // depends on it being ready before the first frame renders, so it's
+        // dispatched the same way any other selection change is (see
+        // `dispatch_preview_update_immediate`) instead of being awaited
+        // here too. That means `App::new` — and so the very first
+        // `terminal.draw()` in `main.rs` — never blocks on a source's
+        // `preview_tui`, no matter how slow it is; the preview pane just
+        // shows its usual loading placeholder until the result arrives over
+        // the update channel like any other. See `node_source`'s docs for
+        // why a source blocking here at all would be a bug in the source,
+        // not just a startup inconvenience.
         let result = app.source.read_dir(&start).await;
         let (col, err) = app.column_from_result(start, result);
         app.set_message(err);
         app.columns.push(col);
         app.sync_focused_list_state();
-        if let Some(entry) = app.selected_entry() {
-            let preview = app.source.preview_tui(&entry.id, &Cancelled::new()).await;
-            app.preview = preview.text;
-            app.preview_override_disable_line_numbers = preview.override_disable_line_numbers;
-        }
+        app.dispatch_preview_update_immediate();
         app
     }
 

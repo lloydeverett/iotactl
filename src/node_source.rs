@@ -64,14 +64,43 @@ impl Preview {
 
 /// Abstracts access to a hierarchy of directories and files.
 ///
-/// Methods are async so implementations that need real I/O or heavy
-/// computation (e.g. a network-backed source) don't block the render loop.
+/// # Do real work off the render thread
+///
+/// `async fn` alone doesn't make a call non-blocking — one that never hits
+/// a genuine yield point runs to completion on whatever thread polled it,
+/// and that thread is shared with rendering, input handling, and every
+/// other in-flight async task (this app runs tokio's multi-threaded
+/// runtime). For a directory listing, file read, syntax highlight, or any
+/// other real work, hand it to [`tokio::task::spawn_blocking`] and
+/// `.await` the `JoinHandle` (mapping a panic to a visible error) instead
+/// of running it inline. See [`crate::fs::FsSource::read_dir`]/
+/// `preview_tui` and [`crate::manual::ManualSource::preview_tui`] for the
+/// pattern — the latter only needs it for one of its two methods, since
+/// its `read_dir` is cheap enough that `spawn_blocking` wouldn't be worth
+/// it.
+///
+/// `App` holds up its end too: it dispatches calls via `tokio::spawn` and
+/// delivers results back through the `AppUpdate` channel (see
+/// `App::dispatch_preview_update_inner`) rather than awaiting a
+/// `NodeSource` call directly from a keypress handler or at startup, so a
+/// slow fetch never blocks a frame — the UI just shows its normal loading
+/// placeholder until the result arrives.
+///
+/// # Cooperative cancellation
+///
+/// See [`Cancelled`]'s docs for details: check `is_cancelled()` wherever a
+/// natural checkpoint exists (a loop over many entries, a chunked read),
+/// but it's fine to skip that for a single bounded operation with nothing
+/// to check against.
 #[async_trait]
 pub trait NodeSource: Send + Sync {
     /// Reads the children of the node at `id`, generally sorted with directories
     /// first, then alphabetically (case-insensitive). Any filtering of the
     /// result (e.g. hidden entries) is entirely up to the source, driven by
     /// whatever toggle state it holds internally.
+    ///
+    /// See the trait-level docs above if this does anything nontrivial —
+    /// it needs the same `spawn_blocking` treatment `preview_tui` does.
     async fn read_dir(&self, id: &[String]) -> io::Result<Vec<Entry>>;
 
     /// Entry describing the root node itself (`id == []`). Used for the
@@ -87,13 +116,10 @@ pub trait NodeSource: Send + Sync {
     /// forced through the escaping in [`crate::sanitize`] — see that
     /// module's docs for why that matters.
     ///
-    /// `cancelled` is flipped once this call is superseded by a newer one
-    /// (e.g. the user already moved the selection again). Implementations
-    /// with a natural checkpoint for expensive work — a loop over many
-    /// entries, a chunked read, a paginated network fetch — are encouraged
-    /// to check it there and bail out early wherever that's practical; it's
-    /// purely advisory, and it's fine to ignore it when there's no sensible
-    /// place to check.
+    /// This is usually where a source's nontrivial work lives (a file read,
+    /// a syntax highlight, ...) — see the trait-level docs above for why
+    /// that needs `spawn_blocking`, and for what `cancelled` is and when to
+    /// check it.
     async fn preview_tui(&self, id: &[String], cancelled: &Cancelled) -> Preview;
 
     /// The commands this source makes available, independent of any

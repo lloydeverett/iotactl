@@ -261,6 +261,10 @@ fn no_such_page(id: &[String]) -> io::Error {
     )
 }
 
+fn error_text(msg: String) -> SanitizedText {
+    SanitizedText::from_text(&msg, Style::default().fg(Color::Red))
+}
+
 /// Icon for a manual entry, per the same directory-vs-document convention
 /// `fs` uses: a category (has children) gets the shared folder glyph with
 /// no color opinion of its own (see `entry_preview::FOLDER_ICON`); a leaf
@@ -305,9 +309,12 @@ pub struct ManualSource {
     /// Whether a leaf page's preview shows its markdown marks as-is (`true`)
     /// or rendered/hidden (`false`, the default) — see
     /// `crate::highlight::RAW_TOGGLE_NAME`. Not shared via `Arc` like `fs`'s
-    /// toggle state, since `ManualSource` is never cloned: every method
-    /// runs synchronously on `&self` rather than moving a clone into a
-    /// blocking task, as there is no real I/O here to block on.
+    /// toggle state: `ManualSource` is never cloned, since its
+    /// `spawn_blocking`'d work (see `preview_tui`) only ever needs the two
+    /// `Copy` values that work actually depends on (the toggle's current
+    /// value, read here with `&self` before dispatch, and the page's
+    /// `&'static str` body), not a clone of the whole source the way `fs`
+    /// needs for its blocking closures to have owned access to `self`.
     raw_markdown: AtomicBool,
 }
 
@@ -322,6 +329,12 @@ impl ManualSource {
 
 #[async_trait]
 impl NodeSource for ManualSource {
+    // Not `spawn_blocking`'d, unlike `fs::FsSource::read_dir` — this only
+    // ever walks this module's small, fixed, in-memory page tree, cheap
+    // enough that dispatching it to the blocking thread pool would cost
+    // more than it saves. See `preview_tui`'s leaf-page branch below for
+    // the case in this source that *does* need it, and `node_source`'s
+    // docs for the general rule.
     async fn read_dir(&self, id: &[String]) -> io::Result<Vec<Entry>> {
         let page = find_page(id).ok_or_else(|| no_such_page(id))?;
         Ok(child_entries(id, page))
@@ -342,19 +355,34 @@ impl NodeSource for ManualSource {
 
     async fn preview_tui(&self, id: &[String], _cancelled: &Cancelled) -> Preview {
         let Some(page) = find_page(id) else {
-            return Preview::new(SanitizedText::from_text(
-                &no_such_page(id).to_string(),
-                Style::default().fg(Color::Red),
-            ));
+            return Preview::new(error_text(no_such_page(id).to_string()));
         };
         if page.children.is_empty() {
+            // Reconciled with `fs::FsSource::preview_tui`: syntax-highlighting
+            // a page's markdown is real CPU work — parsing, and on a cache
+            // miss, building that language's `HighlightConfiguration` (see
+            // `highlight::get_config`) — so, like `fs`, it must not run
+            // inline on the async runtime thread. See `node_source`'s docs
+            // for why. `body`/`hide_markers` are both cheap `Copy` values
+            // (a `&'static str` and a `bool`), so there's no need to clone
+            // `self` into the closure the way `fs` clones its whole source —
+            // only the two values the blocking work actually needs move in.
             let hide_markers = !self.raw_markdown.load(Ordering::SeqCst);
-            Preview::new(highlight::highlighted_text(
-                Path::new(MANUAL_PAGE_PATH),
-                page.body,
-                hide_markers,
-            ))
+            let body = page.body;
+            tokio::task::spawn_blocking(move || {
+                Preview::new(highlight::highlighted_text(
+                    Path::new(MANUAL_PAGE_PATH),
+                    body,
+                    hide_markers,
+                ))
+            })
+            .await
+            .unwrap_or_else(|_| Preview::new(error_text("panicked while loading preview".to_string())))
         } else {
+            // Unlike the branch above, this only ever walks this module's
+            // small, fixed, in-memory page tree (see `child_entries`) — far
+            // too cheap to be worth `spawn_blocking`'s own dispatch
+            // overhead, same reasoning as `read_dir` below.
             Preview {
                 text: entry_preview::format_dir_preview(&child_entries(id, page), self.nerd_font),
                 override_disable_line_numbers: true,
