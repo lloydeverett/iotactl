@@ -30,7 +30,7 @@ use crate::entry::Entry;
 use crate::entry_preview;
 use crate::fs;
 use crate::highlight;
-use crate::node_source::{Cancelled, NodeSource, Preview};
+use crate::node_source::{ByteStream, Cancelled, NodeSource, Preview};
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 
@@ -388,6 +388,15 @@ impl NodeSource for ManualSource {
                 override_disable_line_numbers: true,
             }
         }
+    }
+
+    async fn open(&self, id: &[String]) -> io::Result<ByteStream> {
+        let page = find_page(id).ok_or_else(|| no_such_page(id))?;
+        // The whole page already lives in memory as a `&'static str` (see
+        // the module docs), so there's no actual streaming to do — this
+        // just satisfies `NodeSource::open`'s interface the same way `fs`'s
+        // real, incremental file stream does.
+        Ok(Box::pin(std::io::Cursor::new(page.body.as_bytes())))
     }
 
     fn available_commands(&self) -> Arc<[Command]> {

@@ -13,7 +13,7 @@ use crate::command::Command;
 use crate::entry::Entry;
 use crate::entry_preview;
 use crate::highlight;
-use crate::node_source::{Cancelled, NodeSource, Preview};
+use crate::node_source::{ByteStream, Cancelled, NodeSource, Preview};
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 
@@ -331,6 +331,17 @@ impl NodeSource for FsSource {
             .unwrap_or_else(|_| {
                 Preview::new(error_text("panicked while loading preview".to_string()))
             })
+    }
+
+    async fn open(&self, id: &[String]) -> io::Result<ByteStream> {
+        let path = self.path_from_segments(id)?;
+        // `tokio::fs::File::open` already runs the actual (blocking) open
+        // syscall via `spawn_blocking` internally, and its `AsyncRead` impl
+        // does the same per-read, so no explicit `spawn_blocking` is needed
+        // here the way `preview_tui`/`read_dir` need it for their
+        // `std::fs`-based work.
+        let file = tokio::fs::File::open(path).await?;
+        Ok(Box::pin(file))
     }
 
     fn available_commands(&self) -> Arc<[Command]> {

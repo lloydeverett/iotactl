@@ -1,8 +1,10 @@
 use std::io;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::io::AsyncRead;
 
 use crate::command::Command;
 use crate::entry::Entry;
@@ -61,6 +63,15 @@ impl Preview {
         }
     }
 }
+
+/// A boxed, `Send` handle to a node's raw, unrendered byte content, returned
+/// by [`NodeSource::open`]. Unlike [`Preview`] — which trades faithfulness
+/// for a bounded, display-ready result (a size limit, binary files skipped,
+/// markdown rendered) — this always yields the underlying bytes exactly,
+/// however large or unprintable the node is. It's a stream rather than an
+/// owned buffer so a caller can consume those bytes incrementally instead of
+/// holding the whole thing in memory at once.
+pub type ByteStream = Pin<Box<dyn AsyncRead + Send>>;
 
 /// Abstracts access to a hierarchy of directories and files.
 ///
@@ -121,6 +132,14 @@ pub trait NodeSource: Send + Sync {
     /// that needs `spawn_blocking`, and for what `cancelled` is and when to
     /// check it.
     async fn preview_tui(&self, id: &[String], cancelled: &Cancelled) -> Preview;
+
+    /// Opens the node at `id` for streaming access to its raw, unrendered
+    /// bytes: the file's own contents for an `fs` node, the raw markdown
+    /// source for a `manual` page, and so on for any other source. Returns a
+    /// result in cases `preview_tui` wouldn't — a binary file, or one over
+    /// its size limit — since there's no rendering to do and nothing here
+    /// needs to fit in memory all at once. Not yet invoked anywhere.
+    async fn open(&self, id: &[String]) -> io::Result<ByteStream>;
 
     /// The commands this source makes available, independent of any
     /// particular node. Not yet invoked anywhere.
