@@ -55,7 +55,7 @@ pub static NODE_SOURCE_TYPE: NodeSourceType = NodeSourceType {
         name: highlight::RAW_TOGGLE_NAME,
         key: highlight::RAW_TOGGLE_KEY,
     }],
-    construct_fn: |rest| Ok(Arc::new(ManualSource::new(registry::split_id(rest))?)),
+    construct_fn: |_scheme, rest| Ok(Arc::new(ManualSource::new(rest)?)),
     set_toggle_fn: |toggle, value| {
         if toggle.name == highlight::RAW_TOGGLE_NAME {
             RAW_MARKDOWN.store(value, Ordering::SeqCst);
@@ -352,6 +352,17 @@ fn child_entries(id: &[String], page: &ManualPage) -> Vec<Entry> {
         .collect()
 }
 
+/// Splits the CLI path's rest after `manual://` into id segments — the same
+/// shape `NodeSource::read_dir` takes. Ignores empty segments (a leading,
+/// trailing, or doubled `/`) rather than erroring, so e.g.
+/// `manual://filesystem/` behaves the same as `manual://filesystem`.
+fn split_id(rest: &str) -> Vec<String> {
+    rest.split('/')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// A `NodeSource` that shows the fixed manual tree defined in this module,
 /// scoped at construction to `root` — same idea as `fs::FsSource` scoping
 /// itself to a root directory, just with a fixed in-memory tree standing in
@@ -367,13 +378,16 @@ pub struct ManualSource {
 }
 
 impl ManualSource {
-    /// `root` scopes this source the way `fs::FsSource::new`'s `root`
-    /// parameter scopes a filesystem source: every id given to this source
-    /// afterward is resolved relative to it (see `absolute`). Rejected
-    /// eagerly, before any part of the app is built, if it doesn't name a
-    /// real page — mirroring `FsSource::new` rejecting a nonexistent
-    /// directory the same way.
-    pub fn new(root: Vec<String>) -> io::Result<Self> {
+    /// `root` (the CLI path's rest after `manual://`, e.g. `filesystem` in
+    /// `manual://filesystem`) is split into id segments and then scopes this
+    /// source the way `fs::FsSource::new`'s `root` parameter scopes a
+    /// filesystem source: every id given to this source afterward is
+    /// resolved relative to it (see `absolute`). Rejected eagerly, before
+    /// any part of the app is built, if it doesn't name a real page —
+    /// mirroring `FsSource::new` rejecting a nonexistent directory the same
+    /// way.
+    pub fn new(root: &str) -> io::Result<Self> {
+        let root = split_id(root);
         find_page(&root).ok_or_else(|| no_such_page(&root))?;
         Ok(ManualSource { root })
     }

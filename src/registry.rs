@@ -27,12 +27,12 @@ use crate::toggle::Toggle;
 /// once, via [`toggle_known`], without constructing any of them.
 pub struct NodeSourceType {
     /// URI schemes that select this type on the CLI path (e.g.
-    /// `"manual://"`), matched by prefix — [`create`] strips whichever
-    /// scheme matched before handing the rest to `construct`. The
+    /// `"manual://"`), matched by prefix — [`create`] hands both the
+    /// matched scheme and the rest of the path to `construct`. The
     /// filesystem type's own scheme (`"file://"`) is optional: `create`
-    /// falls back to it, with the path given unaltered, when nothing else
-    /// matches and the path doesn't otherwise look like a URI (see
-    /// [`looks_like_uri`]).
+    /// falls back to it, with the path given unaltered as `rest`, when
+    /// nothing else matches and the path doesn't otherwise look like a URI
+    /// (see [`looks_like_uri`]).
     pub schemes: &'static [&'static str],
     /// Manual content this type contributes about itself, embedded as a
     /// top-level topic in the manual's page tree (see [`crate::manual`]).
@@ -45,13 +45,19 @@ pub struct NodeSourceType {
     /// The toggles this type of source makes available, independent of
     /// any particular node.
     pub toggles: &'static [Toggle],
-    /// Builds this type's source given the CLI path with its matched scheme
-    /// (if any) already stripped. Any finer addressing within the source
-    /// than just picking which type to use (e.g. `manual://filesystem`
-    /// picking a page, not just the manual type) is the source's own job to
-    /// bake into its scope at construction — see `ManualSource::new`'s
-    /// `root` parameter — not something `construct` reports back out.
-    pub(crate) construct_fn: fn(&str) -> io::Result<Arc<dyn NodeSource>>,
+    /// Builds this type's source given the scheme that selected it (e.g.
+    /// `"file://"`, always non-empty and one of this type's own `schemes`
+    /// even when the CLI path itself had none — see [`create`]'s fallback)
+    /// and the rest of the CLI path after that scheme. Handing both pieces
+    /// over, rather than a single pre-stripped string, keeps `create` from
+    /// having to special-case how much of the path a given type gets to
+    /// see; it's this function's own job to decide what to do with them.
+    /// Any finer addressing within the source than just picking which type
+    /// to use (e.g. `manual://filesystem` picking a page, not just the
+    /// manual type) is the source's own job to bake into its scope at
+    /// construction — see `ManualSource::new`'s `root` parameter — not
+    /// something `construct` reports back out.
+    pub(crate) construct_fn: fn(&str, &str) -> io::Result<Arc<dyn NodeSource>>,
     /// Sets `toggle` (one of this type's own `toggles`) to `value`.
     pub(crate) set_toggle_fn: fn(&Toggle, bool) -> io::Result<()>,
     /// Reads the current value of `toggle` (one of this type's own
@@ -61,8 +67,8 @@ pub struct NodeSourceType {
 
 impl NodeSourceType {
     /// See `construct_fn`'s docs.
-    pub fn construct(&self, rest: &str) -> io::Result<Arc<dyn NodeSource>> {
-        (self.construct_fn)(rest)
+    pub fn construct(&self, scheme: &str, rest: &str) -> io::Result<Arc<dyn NodeSource>> {
+        (self.construct_fn)(scheme, rest)
     }
 
     /// Whether this type exposes a toggle named `name` — as opposed to
@@ -118,27 +124,16 @@ fn looks_like_uri(path_arg: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
-/// Splits the part of a CLI path after its scheme into id segments — the
-/// same shape [`crate::node_source::NodeSource::read_dir`] takes. Ignores
-/// empty segments (a leading, trailing, or doubled `/`) rather than
-/// erroring, so e.g. `manual://filesystem/` behaves the same as
-/// `manual://filesystem`.
-pub(crate) fn split_id(rest: &str) -> Vec<String> {
-    rest.split('/')
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
 /// Constructs the node source for `path_arg`, alongside the
 /// [`NodeSourceType`] that turned out to describe it.
 ///
 /// Tries each type's `schemes` as a prefix of `path_arg` in turn; on a
-/// match, that type's `construct` builds the source from the rest of the
-/// path. A `path_arg` matching no scheme at all falls back to the
-/// filesystem type with the whole path — unlike every other type, its
-/// scheme is optional, so this fallback is special-cased here rather than
-/// driven by `NODE_SOURCE_TYPES` the way scheme matches are.
+/// match, that type's `construct` builds the source from the matched scheme
+/// and the rest of the path. A `path_arg` matching no scheme at all falls
+/// back to the filesystem type, unlike every other type, its scheme is
+/// optional — but `construct` still gets called with a scheme, `"file://"`,
+/// and `rest` set to the whole path, so the fallback looks like an ordinary
+/// match rather than a special case only this function knows about.
 ///
 /// But a `path_arg` that merely *looks* like `scheme://...` without
 /// matching any registered scheme (see [`looks_like_uri`]) is never handed
@@ -150,7 +145,7 @@ pub fn create(path_arg: &str) -> io::Result<(Arc<dyn NodeSource>, &'static NodeS
     for &source_type in NODE_SOURCE_TYPES {
         for &scheme in source_type.schemes {
             if let Some(rest) = path_arg.strip_prefix(scheme) {
-                return Ok((source_type.construct(rest)?, source_type));
+                return Ok((source_type.construct(scheme, rest)?, source_type));
             }
         }
     }
@@ -168,7 +163,10 @@ pub fn create(path_arg: &str) -> io::Result<(Arc<dyn NodeSource>, &'static NodeS
             ),
         ));
     }
-    Ok((fs::NODE_SOURCE_TYPE.construct(path_arg)?, &fs::NODE_SOURCE_TYPE))
+    Ok((
+        fs::NODE_SOURCE_TYPE.construct("file://", path_arg)?,
+        &fs::NODE_SOURCE_TYPE,
+    ))
 }
 
 #[cfg(test)]
