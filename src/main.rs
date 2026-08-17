@@ -43,7 +43,11 @@ const PAGE_SIZE: i32 = 10;
 const HALF_PAGE_SIZE: i32 = PAGE_SIZE / 2;
 
 #[derive(Parser)]
-#[command(version, args_override_self = true)]
+#[command(
+    version,
+    args_override_self = true,
+    after_help = "Run `iotactl manual://` to open the built-in manual."
+)]
 struct Cli {
     /// Directory to start browsing from. Defaults to the current directory.
     /// Pass manual:// instead to open the built-in manual.
