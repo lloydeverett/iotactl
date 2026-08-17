@@ -701,9 +701,27 @@ pub fn highlight(path: &Path, text: &str, hide_markers: bool) -> Option<Vec<Line
             }
             HighlightEvent::Source { start, end } => {
                 let name = name_stack.last().copied();
-                let hidden = hide_markers && name == Some("punctuation.special");
-
                 let mut region = &text[start..end];
+                // `@punctuation.special` also covers `(block_continuation)`
+                // (see `MARKDOWN_BLOCK_HIGHLIGHTS_QUERY`), which the grammar
+                // uses for two very different things: a blockquote's
+                // repeated `> ` prefix on each wrapped line of a multi-line
+                // quote (pure decoration, like the quote's own opening `>`
+                // marker — correctly hidden), and a list item's hanging
+                // indent on a wrapped continuation line (structural
+                // whitespace that keeps the line visually under its bullet —
+                // hiding it collapses the indent and makes the continuation
+                // read as a new, unrelated line). The two are
+                // indistinguishable by capture name alone, but not by text:
+                // a real marker always contains a non-whitespace character,
+                // so exempting an all-whitespace region from hiding — the
+                // same "key off the text, not just the capture" approach
+                // `swallow_leading_space` below already uses — hides the
+                // former while leaving the latter alone.
+                let hidden = hide_markers
+                    && name == Some("punctuation.special")
+                    && !region.chars().all(char::is_whitespace);
+
                 if swallow_leading_space && name.is_none() {
                     region = region.trim_start_matches(' ');
                 }
@@ -1317,6 +1335,33 @@ mod tests {
             "expected the list marker to still be dimmed, got {:?}",
             marker_span.style
         );
+    }
+
+    #[test]
+    fn hide_markers_keeps_list_item_continuation_indent() {
+        // A wrapped list item's hanging-indent continuation line is tagged
+        // `(block_continuation)`, the same node kind used for a blockquote's
+        // repeated `> ` prefix — but here its text is pure whitespace, not a
+        // marker, so hide_markers must leave it alone: stripping it would
+        // collapse the indent and make the line read as unrelated to the
+        // bullet above it, even though the underlying markdown is correct.
+        let path = Path::new("sample.md");
+        let text = "- one\n  two\n";
+        let lines = highlight(path, text, true).unwrap();
+        let line1: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(line1, "  two", "continuation indent should survive hide_markers");
+    }
+
+    #[test]
+    fn hide_markers_still_strips_blockquote_continuation_prefix() {
+        // Unlike a list item's continuation indent (see the test above), a
+        // blockquote's `> ` on a wrapped line is pure decoration — same as
+        // its own opening `>` marker — so it should still be hidden.
+        let path = Path::new("sample.md");
+        let text = "> one\n> two\n";
+        let lines = highlight(path, text, true).unwrap();
+        let line1: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(line1, "two", "blockquote continuation marker should still be hidden");
     }
 
     #[test]
