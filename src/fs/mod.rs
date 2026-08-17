@@ -1,5 +1,4 @@
-use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -19,6 +18,11 @@ use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 
 pub mod docs;
+pub mod real;
+pub mod vtable;
+
+use real::RealFsVTable;
+use vtable::FsVTable;
 
 const PREVIEW_READ_LIMIT: usize = 64 * 1024;
 
@@ -211,24 +215,39 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-/// A `NodeSource` backed by the local filesystem, rooted at a fixed
-/// directory. Node ids are segments relative to that root, so the root
-/// itself is addressed as `id == []` and callers can never resolve a path
-/// outside it: access is scoped to wherever the source was constructed.
+/// A `NodeSource` backed by an [`FsVTable`] — the real, local filesystem by
+/// default (see [`FsSource::new`]), but any implementation of that trait —
+/// rooted at a fixed directory. Node ids are segments relative to that
+/// root, so the root itself is addressed as `id == []` and callers can
+/// never resolve a path outside it: access is scoped to wherever the
+/// source was constructed.
 #[derive(Clone)]
 pub struct FsSource {
     root: PathBuf,
+    vtable: Arc<dyn FsVTable>,
 }
 
 impl FsSource {
+    /// Builds a source backed by the real, local filesystem — see
+    /// [`FsSource::with_vtable`] for one backed by anything else.
+    ///
     /// Resolves `root` (e.g. a CLI-supplied path) to an absolute, symlink-free
     /// directory the source will be scoped to. Errors carry `root` itself so
     /// callers can report e.g. `"some/bad/path: No such file or directory"`
     /// without needing to know this is backed by the filesystem.
     pub fn new(root: &str) -> io::Result<Self> {
-        let root =
-            fs::canonicalize(root).map_err(|e| io::Error::new(e.kind(), format!("{root}: {e}")))?;
-        Ok(FsSource { root })
+        Self::with_vtable(root, Arc::new(RealFsVTable))
+    }
+
+    /// Builds a source backed by `vtable` — any implementation of
+    /// [`FsVTable`], not necessarily the real filesystem (e.g. a zip
+    /// archive's contents, addressed the same way a directory tree would
+    /// be). See [`FsSource::new`] for the common case.
+    pub fn with_vtable(root: &str, vtable: Arc<dyn FsVTable>) -> io::Result<Self> {
+        let root = vtable
+            .canonicalize(Path::new(root))
+            .map_err(|e| io::Error::new(e.kind(), format!("{root}: {e}")))?;
+        Ok(FsSource { root, vtable })
     }
 
     /// Resolves `id` to a real path under `root`, rejecting any segment
@@ -260,9 +279,10 @@ impl FsSource {
         Ok(path)
     }
 
-    /// `cancelled` is checked once per entry: cheap relative to the syscalls
-    /// each iteration already does, and lets a scan of a huge directory bail
-    /// out promptly once its result is known to be moot (see
+    /// `cancelled` is forwarded to `self.vtable.read_dir`, which (for
+    /// `RealFsVTable`) checks it once per entry: cheap relative to the
+    /// syscalls each iteration already does, and lets a scan of a huge
+    /// directory bail out promptly once its result is known to be moot (see
     /// `preview_tui_sync`'s directory-preview branch, the only caller that
     /// passes a flag anyone actually sets — `read_dir` below always passes a
     /// fresh, never-cancelled one, since column loads have no supersession
@@ -276,37 +296,20 @@ impl FsSource {
         // commands on every node.
         let suggested_commands: Arc<[Command]> = Arc::from(Vec::new());
 
-        for res in fs::read_dir(&path)? {
-            if cancelled.is_cancelled() {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-            }
-            let dir_entry = res?;
-            let name = dir_entry.file_name().to_string_lossy().to_string();
-            if !show_hidden && name.starts_with('.') {
+        for raw in self.vtable.read_dir(&path, cancelled)? {
+            if !show_hidden && raw.name.starts_with('.') {
                 continue;
             }
 
-            // DirEntry::metadata does not follow symlinks, so we can detect them
-            // and then resolve the target separately to know if it's a directory.
-            let link_metadata = dir_entry.metadata()?;
-            let is_link = link_metadata.file_type().is_symlink();
-            let is_dir = if is_link {
-                fs::metadata(dir_entry.path())
-                    .map(|target_meta| target_meta.is_dir())
-                    .unwrap_or(false)
-            } else {
-                link_metadata.is_dir()
-            };
-
-            let (icon, icon_color) = entry_icon(&name, is_dir);
+            let (icon, icon_color) = entry_icon(&raw.name, raw.is_dir);
 
             let mut child_id = id.to_vec();
-            child_id.push(name.clone());
+            child_id.push(raw.name.clone());
             entries.push(Entry {
-                name,
+                name: raw.name,
                 id: child_id,
-                is_dir,
-                is_link,
+                is_dir: raw.is_dir,
+                is_link: raw.is_link,
                 suggested_commands: suggested_commands.clone(),
                 nerd_icon: Some(icon),
                 nerd_icon_color: icon_color,
@@ -329,19 +332,19 @@ impl FsSource {
         };
         if SHOW_META.load(Ordering::SeqCst) {
             return Preview {
-                text: preview_meta(&path),
+                text: preview_meta(self.vtable.as_ref(), &path),
                 override_disable_line_numbers: true,
             };
         }
-        match fs::metadata(&path) {
-            Ok(meta) if meta.is_dir() => match self.read_dir_sync(id, cancelled) {
+        match self.vtable.metadata(&path) {
+            Ok(meta) if meta.is_dir => match self.read_dir_sync(id, cancelled) {
                 Ok(entries) => Preview {
                     text: entry_preview::format_dir_preview(&entries),
                     override_disable_line_numbers: true,
                 },
                 Err(e) => Preview::new(error_text(e.to_string())),
             },
-            Ok(_) => preview_file(&path, !RAW_MARKDOWN.load(Ordering::SeqCst)),
+            Ok(_) => preview_file(self.vtable.as_ref(), &path, !RAW_MARKDOWN.load(Ordering::SeqCst)),
             Err(e) => Preview::new(error_text(e.to_string())),
         }
     }
@@ -389,13 +392,7 @@ impl NodeSource for FsSource {
 
     async fn open(&self, id: &[String]) -> io::Result<ByteStream> {
         let path = self.path_from_segments(id)?;
-        // `tokio::fs::File::open` already runs the actual (blocking) open
-        // syscall via `spawn_blocking` internally, and its `AsyncRead` impl
-        // does the same per-read, so no explicit `spawn_blocking` is needed
-        // here the way `preview_tui`/`read_dir` need it for their
-        // `std::fs`-based work.
-        let file = tokio::fs::File::open(path).await?;
-        Ok(Box::pin(file))
+        self.vtable.open(&path).await
     }
 
     async fn execute_command(&self, command: &Command, _args: &[String]) -> io::Result<()> {
@@ -414,20 +411,13 @@ fn dim_text(msg: String) -> SanitizedText {
     SanitizedText::from_text(&msg, Style::default().fg(Color::DarkGray))
 }
 
-fn preview_file(path: &Path, hide_markers: bool) -> Preview {
-    let mut file = match fs::File::open(path) {
-        Ok(f) => f,
+fn preview_file(vtable: &dyn FsVTable, path: &Path, hide_markers: bool) -> Preview {
+    let total_size = vtable.metadata(path).map(|m| m.len).unwrap_or(0);
+
+    let buf = match vtable.read_prefix(path, PREVIEW_READ_LIMIT) {
+        Ok(buf) => buf,
         Err(e) => return Preview::new(error_text(e.to_string())),
     };
-
-    let total_size = file.metadata().map(|m| m.len()).unwrap_or(0);
-
-    let mut buf = vec![0u8; PREVIEW_READ_LIMIT];
-    let n = match file.read(&mut buf) {
-        Ok(n) => n,
-        Err(e) => return Preview::new(error_text(e.to_string())),
-    };
-    buf.truncate(n);
 
     if buf.is_empty() {
         return Preview::new(SanitizedText::default());
@@ -517,20 +507,20 @@ fn format_time(time: SystemTime) -> String {
 /// Builds the "meta" toggle's preview: a `key: value` listing of the
 /// selected node's metadata rather than its normal contents. Applies
 /// uniformly to files and directories, since both have this information.
-fn preview_meta(path: &Path) -> SanitizedText {
+fn preview_meta(vtable: &dyn FsVTable, path: &Path) -> SanitizedText {
     // `symlink_metadata` (lstat) rather than `metadata` (stat) so a symlink
     // is detected as one instead of transparently resolved.
-    let link_meta = match fs::symlink_metadata(path) {
+    let link_meta = match vtable.symlink_metadata(path) {
         Ok(m) => m,
         Err(e) => return error_text(e.to_string()),
     };
-    let is_link = link_meta.file_type().is_symlink();
+    let is_link = link_meta.is_symlink;
 
     // For a symlink, prefer the resolved target's metadata (size, times,
     // permissions) like `stat` does, but fall back to the link's own
     // metadata for a broken link rather than erroring out entirely.
     let (meta, broken_link) = if is_link {
-        match fs::metadata(path) {
+        match vtable.metadata(path) {
             Ok(resolved) => (resolved, false),
             Err(_) => (link_meta.clone(), true),
         }
@@ -552,7 +542,7 @@ fn preview_meta(path: &Path) -> SanitizedText {
     ));
 
     let type_desc = if is_link {
-        match fs::read_link(path) {
+        match vtable.read_link(path) {
             Ok(target) => {
                 let target = target.to_string_lossy().to_string();
                 if broken_link {
@@ -563,16 +553,16 @@ fn preview_meta(path: &Path) -> SanitizedText {
             }
             Err(e) => format!("symlink (unreadable target: {e})"),
         }
-    } else if meta.is_dir() {
+    } else if meta.is_dir {
         "directory".to_string()
-    } else if meta.is_file() {
+    } else if meta.is_file {
         "regular file".to_string()
     } else {
         "other".to_string()
     };
     let type_style = if is_link {
         Style::default().fg(Color::Magenta)
-    } else if meta.is_dir() {
+    } else if meta.is_dir {
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
@@ -581,40 +571,40 @@ fn preview_meta(path: &Path) -> SanitizedText {
     };
     lines.push(meta_line("Type", type_desc, type_style));
 
-    if meta.is_dir() {
-        if let Ok(count) = fs::read_dir(path).map(|rd| rd.count()) {
+    if meta.is_dir {
+        if let Ok(count) = vtable.read_dir(path, &Cancelled::new()).map(|v| v.len()) {
             lines.push(meta_line("Entries", count.to_string(), Style::default()));
         }
     } else {
         lines.push(meta_line(
             "Size",
-            format!("{} ({} bytes)", human_size(meta.len()), meta.len()),
+            format!("{} ({} bytes)", human_size(meta.len), meta.len),
             Style::default(),
         ));
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    // `unix` is `None` on a non-Unix platform, or for a backend with
+    // nothing sensible to report here — see `vtable::UnixMetadata`.
+    if let Some(unix) = meta.unix {
         lines.push(meta_line(
             "Permissions",
-            format_permissions(meta.permissions().mode()),
+            format_permissions(unix.mode),
             Style::default(),
         ));
         lines.push(meta_line(
             "Owner",
-            format!("uid={} gid={}", meta.uid(), meta.gid()),
+            format!("uid={} gid={}", unix.uid, unix.gid),
             Style::default(),
         ));
     }
 
-    if let Ok(modified) = meta.modified() {
+    if let Some(modified) = meta.modified {
         lines.push(meta_line("Modified", format_time(modified), Style::default()));
     }
-    if let Ok(accessed) = meta.accessed() {
+    if let Some(accessed) = meta.accessed {
         lines.push(meta_line("Accessed", format_time(accessed), Style::default()));
     }
-    if let Ok(created) = meta.created() {
+    if let Some(created) = meta.created {
         lines.push(meta_line("Created", format_time(created), Style::default()));
     }
 
