@@ -129,13 +129,7 @@ async fn open_streams_full_contents() {
 async fn open_seekable_can_seek_forward_and_backward() {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-    // `--allow-slow-pipes` gates simulated seeking (see
-    // `crate::streams::simulated_seeking`); `config::init` is `main`'s job
-    // in the real binary, so tests exercising this path have to do it
-    // themselves. Guarded by `Once` since it's a once-only global and more
-    // than one test in this binary could reach here.
-    static INIT_CONFIG: std::sync::Once = std::sync::Once::new();
-    INIT_CONFIG.call_once(|| crate::config::init(false, true));
+    crate::config::ensure_initialized_for_tests();
 
     let vfs = open_test_vfs().await;
     let mut stream = vfs.open_seekable(Path::new("/a.txt")).await.unwrap();
@@ -145,7 +139,11 @@ async fn open_seekable_can_seek_forward_and_backward() {
     stream.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"llo");
 
-    // Seeking backward forces the entry stream to restart from scratch.
+    // The test buffer (see `config::ensure_initialized_for_tests`) only
+    // holds the last 2 bytes, so seeking all the way back to 0 lands
+    // outside it and forces the entry stream to restart from scratch —
+    // see `crate::streams::simulated_seeking`'s own tests for the case
+    // where a backward seek instead replays from the buffer.
     stream.seek(std::io::SeekFrom::Start(0)).await.unwrap();
     let mut buf2 = [0u8; 5];
     stream.read_exact(&mut buf2).await.unwrap();

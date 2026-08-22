@@ -38,6 +38,35 @@ use cli_error::die;
 const PAGE_SIZE: i32 = 10;
 const HALF_PAGE_SIZE: i32 = PAGE_SIZE / 2;
 
+/// Default for `--slow-pipe-buffer-size`.
+const DEFAULT_SLOW_PIPE_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+
+/// Parses a byte count for `--slow-pipe-buffer-size`: a plain integer, or
+/// one followed by a `k`/`m`/`g` (or `kb`/`mb`/`gb`) suffix, case-insensitive,
+/// each multiplying by 1024 (matching e.g. `dd`'s `bs=` and `ls -h`, rather
+/// than `k`/`m`/`g` meaning a decimal 1000).
+fn parse_byte_size(s: &str) -> Result<usize, String> {
+    let lower = s.trim().to_ascii_lowercase();
+    let (digits, multiplier) =
+        if let Some(n) = lower.strip_suffix("kb").or_else(|| lower.strip_suffix('k')) {
+            (n, 1024)
+        } else if let Some(n) = lower.strip_suffix("mb").or_else(|| lower.strip_suffix('m')) {
+            (n, 1024 * 1024)
+        } else if let Some(n) = lower.strip_suffix("gb").or_else(|| lower.strip_suffix('g')) {
+            (n, 1024 * 1024 * 1024)
+        } else if let Some(n) = lower.strip_suffix('b') {
+            (n, 1)
+        } else {
+            (lower.as_str(), 1)
+        };
+    let count: usize = digits.trim().parse().map_err(|_| {
+        format!("{s:?} is not a valid size: expected a number, optionally followed by k, m, or g")
+    })?;
+    count
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("{s:?} is too large"))
+}
+
 #[derive(Parser)]
 #[command(
     version,
@@ -85,6 +114,19 @@ struct Cli {
     /// Turning on this flag opts in to that cost.
     #[arg(long, action = ArgAction::SetTrue)]
     allow_slow_pipes: bool,
+
+    /// Size of the buffer simulated seeking (see --allow-slow-pipes) keeps
+    /// of the most recently streamed bytes. Takes a plain number of bytes,
+    /// or one followed by k, m, or g (kb/mb/gb also accepted; case doesn't
+    /// matter), e.g. 8m. A seek backward that lands within this buffer
+    /// replays from it instead of restarting the stream from scratch, so
+    /// this lets us avoid repeated re-streaming if the data fits inside
+    /// this memory buffer. A larger buffer holds more per open stream
+    /// (memory cost) and replays bytes as they were when first streamed
+    /// rather than re-reading them, so it can go stale if the underlying
+    /// pipe's data changes concurrently. 0 disables the buffer.
+    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size, default_value_t = DEFAULT_SLOW_PIPE_BUFFER_SIZE)]
+    slow_pipe_buffer_size: usize,
 }
 
 /// Arg ids (the derived `Cli` field names) allowed to be set via
@@ -101,6 +143,7 @@ const ENV_ALLOWED_ARGS: &[&str] = &[
     "toggle_on",
     "toggle_off",
     "allow_slow_pipes",
+    "slow_pipe_buffer_size",
 ];
 
 /// Shell-word-splits `IOTACTL_FLAGS`, if set and non-empty.
@@ -215,7 +258,11 @@ async fn run_iotactl() -> io::Result<()> {
 
     let path_arg = cli.path.unwrap_or_else(|| ".".to_string());
 
-    config::init(cli.nerd_font && !cli.no_nerd_font, cli.allow_slow_pipes);
+    config::init(
+        cli.nerd_font && !cli.no_nerd_font,
+        cli.allow_slow_pipes,
+        cli.slow_pipe_buffer_size,
+    );
     let mouse = cli.mouse && !cli.no_mouse;
 
     let (tx, rx) = mpsc::unbounded_channel::<AppUpdate>();
@@ -435,5 +482,41 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, term_size: ratatui::layout::Si
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_byte_size;
+
+    #[test]
+    fn parse_byte_size_accepts_plain_bytes() {
+        assert_eq!(parse_byte_size("0"), Ok(0));
+        assert_eq!(parse_byte_size("1024"), Ok(1024));
+        assert_eq!(parse_byte_size(" 1024 "), Ok(1024));
+    }
+
+    #[test]
+    fn parse_byte_size_accepts_binary_suffixes_case_insensitively() {
+        for suffix in ["k", "K", "kb", "KB", "Kb"] {
+            assert_eq!(parse_byte_size(&format!("2{suffix}")), Ok(2 * 1024));
+        }
+        for suffix in ["m", "M", "mb", "MB"] {
+            assert_eq!(parse_byte_size(&format!("2{suffix}")), Ok(2 * 1024 * 1024));
+        }
+        for suffix in ["g", "G", "gb", "GB"] {
+            assert_eq!(
+                parse_byte_size(&format!("2{suffix}")),
+                Ok(2 * 1024 * 1024 * 1024)
+            );
+        }
+        assert_eq!(parse_byte_size("512b"), Ok(512));
+    }
+
+    #[test]
+    fn parse_byte_size_rejects_garbage() {
+        assert!(parse_byte_size("8x").is_err());
+        assert!(parse_byte_size("kb").is_err());
+        assert!(parse_byte_size("").is_err());
     }
 }
