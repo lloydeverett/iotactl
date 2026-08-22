@@ -72,7 +72,8 @@ mod tests {
 
     use crate::command::Command;
     use crate::entry::Entry;
-    use crate::node_source::{ByteStream, Cancelled, Preview, SeekableByteStream};
+    use crate::node_source::{Cancelled, Preview};
+    use crate::streams::{ByteStream, SeekableByteStream};
 
     use super::*;
 

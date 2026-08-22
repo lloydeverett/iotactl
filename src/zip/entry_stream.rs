@@ -1,16 +1,25 @@
-//! `AsyncRead`/`AsyncSeek` streams over one archive entry's decompressed
-//! bytes, backing [`super::ZipVfs::open`]/[`super::ZipVfs::open_seekable`].
-//! The `zip` crate's decompression is entirely synchronous, so both types
-//! here read on a dedicated `spawn_blocking` thread and hand chunks back
-//! across a channel — the same shape [`super::bridge::SyncBridge`] uses for
-//! the opposite direction (sync-over-async there, async-over-sync here).
+//! An `AsyncRead` stream over one archive entry's decompressed bytes,
+//! backing [`super::ZipVfs::open`]. The `zip` crate's decompression is
+//! entirely synchronous, so it reads on a dedicated `spawn_blocking` thread
+//! and hands chunks back across a channel — the same shape
+//! [`super::bridge::SyncBridge`] uses for the opposite direction
+//! (sync-over-async there, async-over-sync here).
+//!
+//! [`super::ZipVfs::open_seekable`] wraps this in
+//! [`crate::streams::simulated_seeking::SimulatedSeek`] instead of its own
+//! seekable variant: the `zip` crate gives no random access into a
+//! compressed entry's decompressed bytes (true even of
+//! `zip::ZipArchive::by_index_seek`, which only helps the `Stored` method),
+//! so a seek here can only ever mean discarding forward through a fresh
+//! [`EntryStream`], which is exactly what that wrapper already does for any
+//! stream shaped this way.
 
 use std::io::{self, Read};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
+use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::mpsc;
 
 use super::bridge::SyncBridge;
@@ -64,9 +73,10 @@ fn spawn_entry_pump(
     rx
 }
 
-/// A [`crate::node_source::ByteStream`] over one archive entry's
-/// decompressed bytes. Forward-only — see [`SeekableEntryStream`] for the
-/// seekable variant `open_seekable` needs.
+/// A [`crate::streams::ByteStream`] over one archive entry's decompressed
+/// bytes. Forward-only, from the entry's start — see this module's doc
+/// comment for how [`super::ZipVfs::open_seekable`] gets seeking out of
+/// repeated, fresh instances of this type.
 pub(super) struct EntryStream {
     rx: mpsc::Receiver<io::Result<Vec<u8>>>,
     pending: Vec<u8>,
@@ -81,30 +91,6 @@ impl EntryStream {
             pending_pos: 0,
         }
     }
-
-    /// Shared by both this type's `AsyncRead` impl and
-    /// [`SeekableEntryStream`]'s: fills as much of `buf` as one
-    /// already-received chunk (or the next one polled from `rx`) can
-    /// satisfy.
-    fn poll_fill(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-        loop {
-            if self.pending_pos < self.pending.len() {
-                let n = buf.remaining().min(self.pending.len() - self.pending_pos);
-                buf.put_slice(&self.pending[self.pending_pos..self.pending_pos + n]);
-                self.pending_pos += n;
-                return Poll::Ready(Ok(()));
-            }
-            match self.rx.poll_recv(cx) {
-                Poll::Ready(Some(Ok(chunk))) => {
-                    self.pending = chunk;
-                    self.pending_pos = 0;
-                }
-                Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(e)),
-                Poll::Ready(None) => return Poll::Ready(Ok(())), // EOF: 0 bytes filled
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-    }
 }
 
 impl AsyncRead for EntryStream {
@@ -113,108 +99,23 @@ impl AsyncRead for EntryStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        self.get_mut().poll_fill(cx, buf)
-    }
-}
-
-/// Like [`EntryStream`], but also implements `AsyncSeek`. The `zip` crate
-/// gives no random access into a compressed entry's decompressed bytes
-/// (true even of `zip::ZipArchive::by_index_seek`, which only helps the
-/// `Stored` method), so a seek that can't be satisfied by discarding
-/// forward through the current pump instead throws it away and starts a
-/// fresh one from the entry's beginning. That's the trade-off inherent in
-/// asking for a *seekable* stream over what's actually a compressed,
-/// sequential format, rather than reading it once, straight through.
-pub(super) struct SeekableEntryStream {
-    archive: Arc<Mutex<Archive>>,
-    index: usize,
-    inner: EntryStream,
-    /// Absolute offset into the entry's decompressed bytes already handed
-    /// to the caller (or discarded while seeking).
-    position: u64,
-    total_len: u64,
-    seek_target: Option<u64>,
-}
-
-impl SeekableEntryStream {
-    pub(super) fn new(archive: Arc<Mutex<Archive>>, index: usize, total_len: u64) -> Self {
-        let inner = EntryStream::new(archive.clone(), index);
-        SeekableEntryStream {
-            archive,
-            index,
-            inner,
-            position: 0,
-            total_len,
-            seek_target: None,
-        }
-    }
-}
-
-impl AsyncRead for SeekableEntryStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let before = buf.filled().len();
-        let result = this.inner.poll_fill(cx, buf);
-        if result.is_ready() {
-            this.position += (buf.filled().len() - before) as u64;
-        }
-        result
-    }
-}
-
-impl AsyncSeek for SeekableEntryStream {
-    fn start_seek(self: Pin<&mut Self>, position: io::SeekFrom) -> io::Result<()> {
-        let this = self.get_mut();
-        let target = match position {
-            io::SeekFrom::Start(n) => n as i128,
-            io::SeekFrom::End(n) => this.total_len as i128 + n as i128,
-            io::SeekFrom::Current(n) => this.position as i128 + n as i128,
-        };
-        if target < 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid seek to a negative position",
-            ));
-        }
-        this.seek_target = Some(target.min(this.total_len as i128) as u64);
-        Ok(())
-    }
-
-    fn poll_complete(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
-        let this = self.get_mut();
-        let Some(target) = this.seek_target else {
-            return Poll::Ready(Ok(this.position));
-        };
-
-        if target < this.position {
-            this.inner = EntryStream::new(this.archive.clone(), this.index);
-            this.position = 0;
-        }
-
-        let mut discard = [0u8; CHUNK_SIZE];
-        while this.position < target {
-            let want = ((target - this.position).min(CHUNK_SIZE as u64)) as usize;
-            let mut read_buf = ReadBuf::new(&mut discard[..want]);
-            match this.inner.poll_fill(cx, &mut read_buf) {
-                Poll::Ready(Ok(())) => {
-                    let n = read_buf.filled().len();
-                    if n == 0 {
-                        break; // EOF short of the target; clamp to where we got
-                    }
-                    this.position += n as u64;
+        loop {
+            if this.pending_pos < this.pending.len() {
+                let n = buf.remaining().min(this.pending.len() - this.pending_pos);
+                buf.put_slice(&this.pending[this.pending_pos..this.pending_pos + n]);
+                this.pending_pos += n;
+                return Poll::Ready(Ok(()));
+            }
+            match this.rx.poll_recv(cx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    this.pending = chunk;
+                    this.pending_pos = 0;
                 }
-                Poll::Ready(Err(e)) => {
-                    this.seek_target = None;
-                    return Poll::Ready(Err(e));
-                }
+                Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(e)),
+                Poll::Ready(None) => return Poll::Ready(Ok(())), // EOF: 0 bytes filled
                 Poll::Pending => return Poll::Pending,
             }
         }
-        this.seek_target = None;
-        Poll::Ready(Ok(this.position))
     }
 }

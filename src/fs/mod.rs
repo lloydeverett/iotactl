@@ -12,10 +12,9 @@ use crate::command::Command;
 use crate::entry::Entry;
 use crate::entry_preview;
 use crate::highlight;
-use crate::node_source::{
-    ByteStream, Cancelled, NodeSource, NodeSourceType, Preview, SeekableByteStream,
-};
+use crate::node_source::{Cancelled, NodeSource, NodeSourceType, Preview};
 use crate::sanitize::SanitizedText;
+use crate::streams::{ByteStream, SeekableByteStream};
 use crate::toggle::Toggle;
 
 pub mod docs;

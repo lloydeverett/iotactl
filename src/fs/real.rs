@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::node_source::{ByteStream, Cancelled, SeekableByteStream};
+use crate::node_source::Cancelled;
+use crate::streams::{ByteStream, SeekableByteStream};
 
 use super::vfs::{DirEntryInfo, Vfs, Metadata, UnixMetadata};
 

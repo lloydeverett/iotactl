@@ -8,10 +8,12 @@ use async_trait::async_trait;
 use tokio::runtime::Handle;
 
 use crate::fs::vfs::{DirEntryInfo, Metadata, Vfs};
-use crate::node_source::{ByteStream, Cancelled, SeekableByteStream};
+use crate::node_source::Cancelled;
+use crate::streams::simulated_seeking::SimulatedSeek;
+use crate::streams::{ByteStream, SeekableByteStream};
 
 use super::bridge::SyncBridge;
-use super::entry_stream::{Archive, EntryStream, SeekableEntryStream};
+use super::entry_stream::{Archive, EntryStream};
 use super::index::{key_from_path, path_from_key, system_time_from_zip_datetime};
 use super::index::{FileEntry, Index, Node};
 
@@ -224,8 +226,10 @@ impl Vfs for ZipVfs {
 
     async fn open_seekable(&self, path: &Path) -> io::Result<SeekableByteStream> {
         let entry = resolve_file(self, path)?;
-        let stream =
-            SeekableEntryStream::new(self.archive.clone(), entry.archive_index, entry.size);
-        Ok(Box::pin(stream))
+        let archive = self.archive.clone();
+        let index = entry.archive_index;
+        let make_stream: Box<dyn FnMut() -> ByteStream + Send> =
+            Box::new(move || Box::pin(EntryStream::new(archive.clone(), index)) as ByteStream);
+        Ok(Box::pin(SimulatedSeek::new(make_stream, entry.size)))
     }
 }

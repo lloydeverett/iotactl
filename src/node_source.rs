@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::command::Command;
 use crate::entry::Entry;
 use crate::sanitize::SanitizedText;
+use crate::streams::{ByteStream, SeekableByteStream};
 use crate::toggle::Toggle;
 
 /// A cheap, cloneable "has this call been superseded?" signal passed into
@@ -83,26 +83,6 @@ pub struct ManualPage {
     pub body: &'static str,
     pub children: &'static [&'static ManualPage],
 }
-
-/// A boxed, `Send` handle to a node's raw, unrendered byte content, returned
-/// by [`NodeSource::open`]. Unlike [`Preview`] — which trades faithfulness
-/// for a bounded, display-ready result (a size limit, binary files skipped,
-/// markdown rendered) — this always yields the underlying bytes exactly,
-/// however large or unprintable the node is. It's a stream rather than an
-/// owned buffer so a caller can consume those bytes incrementally instead of
-/// holding the whole thing in memory at once.
-pub type ByteStream = Pin<Box<dyn AsyncRead + Send>>;
-
-/// A reader that also supports seeking, so it can be boxed as a single
-/// trait object rather than two separate ones over the same underlying
-/// value.
-pub trait AsyncReadSeek: AsyncRead + AsyncSeek {}
-impl<T: AsyncRead + AsyncSeek + ?Sized> AsyncReadSeek for T {}
-
-/// Like [`ByteStream`], but returned by [`NodeSource::open_seekable`]:
-/// whenever that call succeeds, the stream it hands back is guaranteed to
-/// support seeking, unlike a plain [`ByteStream`] which may or may not.
-pub type SeekableByteStream = Pin<Box<dyn AsyncReadSeek + Send>>;
 
 /// Abstracts access to a hierarchy of directories and files.
 ///

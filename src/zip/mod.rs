@@ -9,7 +9,7 @@
 //! Alongside `Vfs`, this module contributes a `zip://`
 //! [`NodeSourceType`](crate::node_source::NodeSourceType) (see [`source`]),
 //! which wraps [`ZipVfs`] in `crate::fs::FsSource::with_vfs` over a
-//! [`crate::node_source::SeekableByteStream`] piped in from another node
+//! [`crate::streams::SeekableByteStream`] piped in from another node
 //! source (see `crate::registry::create`'s pipe-parsing) rather than
 //! constructing an `Arc<dyn Vfs>` from a CLI path directly the way every
 //! other type here builds itself — there's nowhere for `zip://`'s bytes to

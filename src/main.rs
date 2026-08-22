@@ -10,6 +10,7 @@ mod manual;
 mod node_source;
 mod registry;
 mod sanitize;
+mod streams;
 mod toggle;
 mod ui;
 mod zip;

@@ -24,7 +24,8 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 
-use crate::node_source::{ByteStream, Cancelled, SeekableByteStream};
+use crate::node_source::Cancelled;
+use crate::streams::{ByteStream, SeekableByteStream};
 
 /// Unix-only metadata fields, held separately from [`Metadata`] rather than
 /// inlined into it since they have no meaningful value on a non-Unix

@@ -6,7 +6,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::runtime::Handle;
 
-use crate::node_source::SeekableByteStream;
+use crate::streams::SeekableByteStream;
 
 /// Wraps a [`SeekableByteStream`] so it can back a `zip::ZipArchive`, by
 /// blocking on each read/seek via `Handle::block_on`. This is what lets

@@ -30,11 +30,10 @@ use crate::command::Command;
 use crate::entry::Entry;
 use crate::entry_preview;
 use crate::highlight;
-use crate::node_source::{
-    ByteStream, Cancelled, ManualPage, NodeSource, NodeSourceType, Preview, SeekableByteStream,
-};
+use crate::node_source::{Cancelled, ManualPage, NodeSource, NodeSourceType, Preview};
 use crate::registry;
 use crate::sanitize::SanitizedText;
+use crate::streams::{ByteStream, SeekableByteStream};
 use crate::toggle::Toggle;
 
 /// Backing state for [`highlight::RAW_TOGGLE_NAME`], the manual's only

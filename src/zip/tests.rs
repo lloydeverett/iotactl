@@ -5,7 +5,7 @@ use std::sync::Arc;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
 use crate::fs::vfs::Vfs;
-use crate::node_source::SeekableByteStream;
+use crate::streams::SeekableByteStream;
 
 use super::ZipVfs;
 
