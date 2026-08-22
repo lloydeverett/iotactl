@@ -80,7 +80,15 @@ pub static NODE_SOURCE_TYPE: NodeSourceType = NodeSourceType {
             key: 'm',
         },
     ],
-    construct_fn: |_scheme, rest| Ok(Arc::new(FsSource::new(rest)?)),
+    construct_fn: |_scheme, rest, pipe| {
+        if pipe.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "file:// can't be piped into from another node source",
+            ));
+        }
+        Ok(Arc::new(FsSource::new(rest)?))
+    },
     set_toggle_fn: |toggle, value| {
         if toggle.name == HIDDEN_TOGGLE_NAME {
             SHOW_HIDDEN.store(value, Ordering::SeqCst);

@@ -14,6 +14,7 @@ use crate::fs;
 use crate::manual;
 use crate::node_source::{ManualPage, NodeSource};
 use crate::toggle::Toggle;
+use crate::zip;
 
 /// Describes one kind of node source iotactl can browse, independent of
 /// any particular instance of it.
@@ -57,7 +58,17 @@ pub struct NodeSourceType {
     /// manual type) is the source's own job to bake into its scope at
     /// construction — see `ManualSource::new`'s `root` parameter — not
     /// something `construct` reports back out.
-    pub(crate) construct_fn: fn(&str, &str) -> io::Result<Arc<dyn NodeSource>>,
+    ///
+    /// `pipe` is the node source that piped into this one — `Some` when
+    /// this segment wasn't the first in a `|`-delimited path (see
+    /// [`create`]'s pipe-parsing), `None` otherwise. Only some types make
+    /// sense as a pipe's destination (e.g. a future `zip://`, whose bytes
+    /// have to come from somewhere); a type that doesn't should reject a
+    /// `Some` here rather than silently ignoring it, and a type that
+    /// *requires* piping (nothing to browse on its own) should reject
+    /// `None` the same way. `fs` and `manual` both reject `Some`.
+    pub(crate) construct_fn:
+        fn(&str, &str, Option<Arc<dyn NodeSource>>) -> io::Result<Arc<dyn NodeSource>>,
     /// Sets `toggle` (one of this type's own `toggles`) to `value`.
     pub(crate) set_toggle_fn: fn(&Toggle, bool) -> io::Result<()>,
     /// Reads the current value of `toggle` (one of this type's own
@@ -67,8 +78,13 @@ pub struct NodeSourceType {
 
 impl NodeSourceType {
     /// See `construct_fn`'s docs.
-    pub fn construct(&self, scheme: &str, rest: &str) -> io::Result<Arc<dyn NodeSource>> {
-        (self.construct_fn)(scheme, rest)
+    pub fn construct(
+        &self,
+        scheme: &str,
+        rest: &str,
+        pipe: Option<Arc<dyn NodeSource>>,
+    ) -> io::Result<Arc<dyn NodeSource>> {
+        (self.construct_fn)(scheme, rest, pipe)
     }
 
     /// Whether this type exposes a toggle named `name` — as opposed to
@@ -90,7 +106,11 @@ impl NodeSourceType {
 
 /// Every node source type iotactl knows how to construct, each contributed
 /// by its own module.
-pub static NODE_SOURCE_TYPES: &[&NodeSourceType] = &[&manual::NODE_SOURCE_TYPE, &fs::NODE_SOURCE_TYPE];
+pub static NODE_SOURCE_TYPES: &[&NodeSourceType] = &[
+    &manual::NODE_SOURCE_TYPE,
+    &fs::NODE_SOURCE_TYPE,
+    &zip::NODE_SOURCE_TYPE,
+];
 
 /// Whether *some* known node source type — not necessarily the one
 /// currently in use — exposes a toggle named `name`. Lets a caller (e.g.
@@ -124,49 +144,119 @@ fn looks_like_uri(path_arg: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
-/// Constructs the node source for `path_arg`, alongside the
-/// [`NodeSourceType`] that turned out to describe it.
+/// Splits `path_arg` on unescaped `|` characters into pipe segments — see
+/// [`create`]'s docs for the overall scheme this supports. Only ever called
+/// on a `path_arg` that [`looks_like_uri`]; the fallback filesystem case
+/// never splits on `|` at all, so a real filename containing one is never
+/// mangled there.
 ///
-/// Tries each type's `schemes` as a prefix of `path_arg` in turn; on a
-/// match, that type's `construct` builds the source from the matched scheme
-/// and the rest of the path. A `path_arg` matching no scheme at all falls
-/// back to the filesystem type, unlike every other type, its scheme is
-/// optional — but `construct` still gets called with a scheme, `"file://"`,
-/// and `rest` set to the whole path, so the fallback looks like an ordinary
-/// match rather than a special case only this function knows about.
+/// A `|` is a segment boundary unless doubled (`||`), which decodes to one
+/// literal `|` within a segment instead — the only way to address a node
+/// whose own path genuinely contains a pipe character. Doubling is resolved
+/// greedily, left to right, so `"a|||b"` splits into `"a|"` and `"b"`, not
+/// `"a"` and `"|b"`. Each segment is trimmed of surrounding ASCII
+/// whitespace, so `"file://x.zip | zip://y"` reads the same as
+/// `"file://x.zip|zip://y"` — the spaces are purely for readability.
+fn split_pipe_segments(path_arg: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = path_arg.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '|' {
+            if chars.peek() == Some(&'|') {
+                chars.next();
+                current.push('|');
+            } else {
+                segments.push(current.trim().to_string());
+                current = String::new();
+            }
+        } else {
+            current.push(c);
+        }
+    }
+    segments.push(current.trim().to_string());
+    segments
+}
+
+/// Matches `segment` — one pipe segment from [`split_pipe_segments`], or a
+/// whole non-piped `path_arg` — against every registered type's `schemes`
+/// as a prefix, constructing the matching type with `pipe` as its upstream
+/// source (see `NodeSourceType::construct_fn`'s docs for what that means).
 ///
-/// But a `path_arg` that merely *looks* like `scheme://...` without
-/// matching any registered scheme (see [`looks_like_uri`]) is never handed
-/// to the filesystem type — that would just fail later as a nonsense path
-/// (or worse, silently succeed against a same-named file or directory in
-/// the current directory). Instead this fails fast with an error naming the
-/// unrecognized scheme and what's actually available.
-pub fn create(path_arg: &str) -> io::Result<(Arc<dyn NodeSource>, &'static NodeSourceType)> {
+/// Fails the way [`create`] used to when nothing matches: with an error
+/// naming the unrecognized scheme and what's actually available. Unlike
+/// `create`'s old fallback, there's no filesystem special case here —
+/// `construct_scheme` is only ever reached for something that already
+/// [`looks_like_uri`], so a `segment` matching no scheme is a typo or an
+/// unsupported scheme, never an ordinary path.
+fn construct_scheme(
+    segment: &str,
+    pipe: Option<Arc<dyn NodeSource>>,
+) -> io::Result<(Arc<dyn NodeSource>, &'static NodeSourceType)> {
     for &source_type in NODE_SOURCE_TYPES {
         for &scheme in source_type.schemes {
-            if let Some(rest) = path_arg.strip_prefix(scheme) {
-                return Ok((source_type.construct(scheme, rest)?, source_type));
+            if let Some(rest) = segment.strip_prefix(scheme) {
+                return Ok((source_type.construct(scheme, rest, pipe)?, source_type));
             }
         }
     }
-    if looks_like_uri(path_arg) {
-        let scheme = path_arg.split("://").next().unwrap();
-        let known: Vec<&str> = NODE_SOURCE_TYPES
-            .iter()
-            .flat_map(|source_type| source_type.schemes.iter().copied())
-            .collect();
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "unrecognized scheme \"{scheme}://\" (known schemes: {})",
-                known.join(", ")
-            ),
+    let scheme = segment.split("://").next().unwrap_or(segment);
+    let known: Vec<&str> = NODE_SOURCE_TYPES
+        .iter()
+        .flat_map(|source_type| source_type.schemes.iter().copied())
+        .collect();
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "unrecognized scheme \"{scheme}://\" (known schemes: {})",
+            known.join(", ")
+        ),
+    ))
+}
+
+/// Constructs the node source for `path_arg`, alongside the
+/// [`NodeSourceType`] that turned out to describe it.
+///
+/// A `path_arg` that [`looks_like_uri`] may additionally chain node sources
+/// together with `|`: [`split_pipe_segments`] breaks it into pieces, each
+/// constructed in turn via [`construct_scheme`] and handed the previous
+/// segment's freshly built source as its `pipe` — so
+/// `"file://x.zip | zip://foo.txt"` builds the `file://` source first, then
+/// builds the `zip://` source with that `file://` source as its `pipe`
+/// (unimplemented today, see `crate::zip`, but already reachable through
+/// this path). The final segment's source is what's returned. A single,
+/// unpiped `path_arg` is just the one-segment case of the same loop.
+///
+/// A `path_arg` that doesn't look like a URI at all skips every bit of the
+/// above — no splitting, no `||` decoding, `|` is just an ordinary
+/// character — and falls back to the filesystem type unaltered, unlike
+/// every other type, its scheme is optional. But `construct` still gets
+/// called with a scheme, `"file://"`, and `rest` set to the whole path, so
+/// the fallback looks like an ordinary match rather than a special case
+/// only this function knows about.
+///
+/// A `path_arg` that merely *looks* like `scheme://...` (or, for a later
+/// pipe segment, a segment that looks like one) without matching any
+/// registered scheme is never handed to the filesystem type — that would
+/// just fail later as a nonsense path (or worse, silently succeed against a
+/// same-named file or directory in the current directory). Instead this
+/// fails fast with an error naming the unrecognized scheme and what's
+/// actually available.
+pub fn create(path_arg: &str) -> io::Result<(Arc<dyn NodeSource>, &'static NodeSourceType)> {
+    if !looks_like_uri(path_arg) {
+        return Ok((
+            fs::NODE_SOURCE_TYPE.construct("file://", path_arg, None)?,
+            &fs::NODE_SOURCE_TYPE,
         ));
     }
-    Ok((
-        fs::NODE_SOURCE_TYPE.construct("file://", path_arg)?,
-        &fs::NODE_SOURCE_TYPE,
-    ))
+    let mut pipe: Option<Arc<dyn NodeSource>> = None;
+    let mut built: Option<(Arc<dyn NodeSource>, &'static NodeSourceType)> = None;
+    for segment in split_pipe_segments(path_arg) {
+        let (source, source_type) = construct_scheme(&segment, pipe.take())?;
+        pipe = Some(Arc::clone(&source));
+        built = Some((source, source_type));
+    }
+    Ok(built.expect("split_pipe_segments always yields at least one segment"))
 }
 
 #[cfg(test)]
@@ -202,5 +292,66 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("bogus://"), "message was: {message}");
         assert!(message.contains("manual://"), "message was: {message}");
+    }
+
+    #[test]
+    fn split_pipe_segments_splits_and_trims() {
+        assert_eq!(
+            split_pipe_segments("file://x.zip | zip://foo.txt"),
+            vec!["file://x.zip", "zip://foo.txt"]
+        );
+        assert_eq!(split_pipe_segments("a://b"), vec!["a://b"]);
+    }
+
+    #[test]
+    fn split_pipe_segments_decodes_doubled_pipes_greedily() {
+        assert_eq!(split_pipe_segments("a||b"), vec!["a|b"]);
+        assert_eq!(split_pipe_segments("a|||b"), vec!["a|", "b"]);
+    }
+
+    #[test]
+    fn create_does_not_split_on_pipe_for_a_plain_filesystem_path() {
+        // Not a URI at all, so `|` is just an ordinary filename character —
+        // this should try (and fail) to open a single literal path rather
+        // than being split into pipe segments.
+        let Err(err) = create("some/nonexistent|path") else {
+            panic!("expected create() to fail opening a nonexistent path");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn create_rejects_a_pipe_into_a_type_that_does_not_support_it() {
+        let Err(err) = create("manual:// | manual://") else {
+            panic!("expected create() to fail piping into manual://");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            err.to_string().contains("manual://"),
+            "message was: {err}"
+        );
+    }
+
+    #[test]
+    fn create_rejects_zip_with_nothing_piped_into_it() {
+        let Err(err) = create("zip://foo.txt") else {
+            panic!("expected create() to fail constructing zip:// with no pipe");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn create_pipes_a_constructed_source_into_the_next_segment() {
+        // zip:// is only a stub today, but reaching its "not implemented"
+        // error (rather than "nothing to read on its own") proves the
+        // manual:// source it's piped from was built and handed over.
+        let Err(err) = create("manual:// | zip://foo.txt") else {
+            panic!("expected create() to fail on the unimplemented zip:// stub");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            err.to_string().contains("not implemented"),
+            "message was: {err}"
+        );
     }
 }

@@ -6,18 +6,22 @@
 //! `AGENTS.md` for how this fits the project's eventual goal of
 //! non-filesystem-based node sources.
 //!
-//! This module only provides the `Vfs` implementation, not a full
-//! `NodeSource` — nothing here decides what scheme addresses a zip archive
-//! on the CLI, or how its root is chosen. A future node source would wrap
-//! [`ZipVfs`] behind `crate::fs::FsSource::with_vfs`, handing it a
-//! [`crate::node_source::SeekableByteStream`] opened from wherever the
-//! archive's bytes actually live.
+//! Alongside `Vfs`, this module contributes a `zip://`
+//! [`NodeSourceType`](crate::registry::NodeSourceType) (see [`source`]) —
+//! for now just a stub, since the real thing needs
+//! [`ZipVfs`] wrapped in `crate::fs::FsSource::with_vfs` over a
+//! [`crate::node_source::SeekableByteStream`] piped in from another node
+//! source (see `crate::registry::create`'s pipe-parsing), not just an
+//! `Arc<dyn Vfs>` constructed from a CLI path the way every other type here
+//! builds itself.
 
 mod archive;
 mod bridge;
 mod entry_stream;
 mod index;
+mod source;
 #[cfg(test)]
 mod tests;
 
 pub use archive::ZipVfs;
+pub use source::NODE_SOURCE_TYPE;

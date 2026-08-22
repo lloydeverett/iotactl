@@ -57,7 +57,15 @@ pub static NODE_SOURCE_TYPE: NodeSourceType = NodeSourceType {
         name: highlight::RAW_TOGGLE_NAME,
         key: highlight::RAW_TOGGLE_KEY,
     }],
-    construct_fn: |_scheme, rest| Ok(Arc::new(ManualSource::new(rest)?)),
+    construct_fn: |_scheme, rest, pipe| {
+        if pipe.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "manual:// can't be piped into from another node source",
+            ));
+        }
+        Ok(Arc::new(ManualSource::new(rest)?))
+    },
     set_toggle_fn: |toggle, value| {
         if toggle.name == highlight::RAW_TOGGLE_NAME {
             RAW_MARKDOWN.store(value, Ordering::SeqCst);
