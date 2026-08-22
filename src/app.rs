@@ -151,9 +151,8 @@ pub struct App {
 
 /// Fetches every toggle `source_type` exposes along with its current
 /// value. Only ever done up front and cached — see `App::source_toggles`
-/// — even though, unlike before `NodeSourceType::get_toggle` existed,
-/// there'd be nothing wrong with calling it again later; toggle state is
-/// process-global now; see `NodeSourceType`'s docs.
+/// — though toggle state is process-global, so refetching later would work
+/// too; see `NodeSourceType`'s docs.
 fn load_source_toggles(source_type: &'static NodeSourceType) -> Vec<(Toggle, bool)> {
     source_type
         .toggles

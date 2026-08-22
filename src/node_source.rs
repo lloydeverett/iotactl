@@ -156,7 +156,7 @@ pub trait NodeSource: Send + Sync {
     /// source for a `manual` page, and so on for any other source. Returns a
     /// result in cases `preview_tui` wouldn't — a binary file, or one over
     /// its size limit — since there's no rendering to do and nothing here
-    /// needs to fit in memory all at once. Not yet invoked anywhere.
+    /// needs to fit in memory all at once.
     async fn open(&self, id: &[String]) -> io::Result<ByteStream>;
 
     /// Like [`open`](NodeSource::open), but guarantees the returned stream
@@ -164,10 +164,10 @@ pub trait NodeSource: Send + Sync {
     /// offer that guarantee cheaply (e.g. something streamed straight off a
     /// socket, with no way to seek without buffering it all first) should
     /// return an `Unsupported` error here rather than a stream that can't
-    /// actually seek. Not yet invoked anywhere.
+    /// actually seek.
     async fn open_seekable(&self, id: &[String]) -> io::Result<SeekableByteStream>;
 
-    /// Runs `command` with `args`. Not yet invoked anywhere.
+    /// Runs `command` with `args`.
     async fn execute_command(&self, command: &Command, args: &[String]) -> io::Result<()>;
 }
 
@@ -197,7 +197,7 @@ pub struct NodeSourceType {
     /// type itself, whose own pages already are the manual.
     pub manual_page: Option<&'static ManualPage>,
     /// The commands this type of source makes available, independent of
-    /// any particular node. Not yet invoked anywhere.
+    /// any particular node.
     pub commands: &'static [Command],
     /// The toggles this type of source makes available, independent of
     /// any particular node.
@@ -223,8 +223,7 @@ pub struct NodeSourceType {
     /// bytes have to come from somewhere); a type that doesn't should
     /// reject a `Some` here rather than silently ignoring it, and a type
     /// that *requires* piping (nothing to browse on its own) should reject
-    /// `None` the same way. `fs` and `manual` both reject `Some`; `zip`
-    /// rejects `None` (see `crate::zip::source`).
+    /// `None` the same way — see `crate::zip::source` for the pattern.
     ///
     /// Returns a boxed, `'static` future rather than being an `async fn`
     /// itself: `construct_fn` is a plain, non-capturing `fn` pointer (each

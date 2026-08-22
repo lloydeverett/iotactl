@@ -155,20 +155,14 @@ const MARKDOWN_BLOCK_INJECTIONS_QUERY: &str = r#"
 /// `(fenced_code_block)` (the container spanning the delimiters *and* the
 /// content) is dropped entirely, replaced by `(fenced_code_block_delimiter)`
 /// and `(info_string)` specifically — i.e. just the ` ```json ` / ` ``` `
-/// lines, not `(code_fence_content)` itself (the now-pointless
-/// `(code_fence_content) @none` that used to cancel the inherited tint over
-/// the content is dropped too). Tried recognizing `@none` first — mapping it
-/// to `Style::default()` to explicitly cancel the green tint over the
-/// content — but `(code_fence_content)`'s span is *exactly* the injected
-/// python/html/etc. layer's content range, and that exact-boundary overlap
-/// between the outer "none" highlight and the injected layer corrupts
-/// tree-sitter-highlight's cross-layer event ordering: a keyword's own
-/// `HighlightEnd` (e.g. after `def`) got swapped with the far-later `@none`
-/// region's end, so the highlight span leaked across unrelated tokens
-/// several lines down. Simplest correct fix is to just never apply an outer
-/// tint to `(code_fence_content)` in the first place — its delimiter/
-/// info_string siblings don't overlap the injected range at all, so
-/// tagging *them* is safe, and injected content renders with its own real
+/// lines, never `(code_fence_content)` itself. Tagging `(code_fence_content)`
+/// at all (even `@none`, to cancel an inherited tint) is unsafe: its span is
+/// *exactly* the injected python/html/etc. layer's content range, and that
+/// exact-boundary overlap corrupts tree-sitter-highlight's cross-layer event
+/// ordering — a keyword's `HighlightEnd` can get swapped with the other
+/// layer's region end, leaking the highlight across unrelated tokens. Its
+/// delimiter/info_string siblings don't overlap the injected range, so
+/// tagging only them is safe, and injected content renders with its own real
 /// styling (or plain, if the fence's language isn't recognized) with no
 /// ancestor style for anything to fight over.
 ///
@@ -550,8 +544,7 @@ fn build_language_config(name: &str) -> Option<(&'static str, HighlightConfigura
 /// eagerly on the very first call noticeably delayed that call's caller,
 /// even when most of what it built would go unused for the entire session.
 /// Once built, a language's config is cached here for the process's
-/// lifetime, same as the old eager registry — this only changes *when* the
-/// work happens, not how often.
+/// lifetime.
 fn get_config(name: &str) -> Option<&'static HighlightConfiguration> {
     static CACHE: OnceLock<Mutex<HashMap<&'static str, &'static HighlightConfiguration>>> =
         OnceLock::new();
@@ -940,10 +933,9 @@ mod tests {
 
     #[test]
     fn fenced_python_keyword_does_not_leak_across_lines() {
-        // Regression test: the `def` keyword's highlight span used to leak
-        // all the way to the end of the fenced block (covering `():`, the
-        // indent, and the space after `return`) instead of ending right
-        // after `def`. See MARKDOWN_BLOCK_HIGHLIGHTS_QUERY's doc comment.
+        // Guards the fix described in MARKDOWN_BLOCK_HIGHLIGHTS_QUERY's doc
+        // comment: a keyword's highlight span must end right after the
+        // keyword, not leak into the rest of the fenced block.
         let path = Path::new("sample.md");
         let text = "```python\ndef foo():\n    return 42\n```\n";
         let lines = highlight(path, text, false).unwrap();
@@ -1138,10 +1130,8 @@ mod tests {
 
     #[test]
     fn yaml_frontmatter_is_highlighted() {
-        // Regression coverage for MARKDOWN_BLOCK_INJECTIONS_QUERY's
-        // `(minus_metadata) @injection.content` pattern, which was
-        // hand-written (to add `injection.include-children`) but never
-        // actually exercised by a test.
+        // Covers MARKDOWN_BLOCK_INJECTIONS_QUERY's
+        // `(minus_metadata) @injection.content` pattern.
         let path = Path::new("sample.md");
         let text = "---\nkey: value\n---\n";
         let lines = highlight(path, text, false).unwrap();

@@ -93,11 +93,10 @@ fn split_pipe_segments(path_arg: &str) -> Vec<String> {
 /// as a prefix, constructing the matching type with `pipe` as its upstream
 /// source (see `NodeSourceType::construct_fn`'s docs for what that means).
 ///
-/// Fails the way [`create`] used to when nothing matches: with an error
-/// naming the unrecognized scheme and what's actually available. Unlike
-/// `create`'s old fallback, there's no filesystem special case here —
-/// `construct_scheme` is only ever reached for something that already
-/// [`looks_like_uri`], so a `segment` matching no scheme is a typo or an
+/// Fails with an error naming the unrecognized scheme and what's actually
+/// available if nothing matches. No filesystem fallback here — unlike
+/// [`create`], `construct_scheme` is only ever reached for a `segment` that
+/// already [`looks_like_uri`], so a scheme matching nothing is a typo or an
 /// unsupported scheme, never an ordinary path.
 async fn construct_scheme(
     segment: &str,
@@ -127,32 +126,19 @@ async fn construct_scheme(
 /// Constructs the node source for `path_arg`, alongside the
 /// [`NodeSourceType`] that turned out to describe it.
 ///
-/// A `path_arg` that [`looks_like_uri`] may additionally chain node sources
-/// together with `|`: [`split_pipe_segments`] breaks it into pieces, each
-/// constructed in turn via [`construct_scheme`] and handed the previous
-/// segment's freshly built source as its `pipe` — so
-/// `"file://x.zip | zip://"` builds the `file://` source first, then builds
-/// the `zip://` source with that `file://` source as its `pipe` (see
-/// `crate::zip::source`, which awaits the piped-in source's bytes before it
-/// can parse them as an archive — the reason this whole function is async).
-/// The final segment's source is what's returned. A single, unpiped
-/// `path_arg` is just the one-segment case of the same loop.
+/// A `path_arg` that [`looks_like_uri`] may chain sources with `|`:
+/// [`split_pipe_segments`] breaks it into pieces, each built in turn via
+/// [`construct_scheme`] and handed the previous segment's source as its
+/// `pipe` (so `"file://x.zip | zip://"` builds `file://` first, then
+/// `zip://` piped from it). The final segment's source is returned. A
+/// segment that [`looks_like_uri`] but matches no registered scheme fails
+/// fast instead of falling through to the filesystem type — that would just
+/// fail later as a nonsense path, or silently succeed against an unrelated
+/// same-named file.
 ///
-/// A `path_arg` that doesn't look like a URI at all skips every bit of the
-/// above — no splitting, no `||` decoding, `|` is just an ordinary
-/// character — and falls back to the filesystem type unaltered, unlike
-/// every other type, its scheme is optional. But `construct` still gets
-/// called with a scheme, `"file://"`, and `rest` set to the whole path, so
-/// the fallback looks like an ordinary match rather than a special case
-/// only this function knows about.
-///
-/// A `path_arg` that merely *looks* like `scheme://...` (or, for a later
-/// pipe segment, a segment that looks like one) without matching any
-/// registered scheme is never handed to the filesystem type — that would
-/// just fail later as a nonsense path (or worse, silently succeed against a
-/// same-named file or directory in the current directory). Instead this
-/// fails fast with an error naming the unrecognized scheme and what's
-/// actually available.
+/// A `path_arg` that doesn't look like a URI at all is never split on `|` —
+/// it falls straight through to the filesystem type, with the whole string
+/// as its path.
 pub async fn create(path_arg: &str) -> io::Result<(Arc<dyn NodeSource>, &'static NodeSourceType)> {
     if !looks_like_uri(path_arg) {
         return Ok((

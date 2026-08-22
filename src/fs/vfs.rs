@@ -2,14 +2,11 @@
 //! that would otherwise be a direct `std::fs`/`tokio::fs` call: listing a
 //! directory, reading metadata, following a symlink, reading a file's
 //! bytes. `FsSource` itself holds only an `Arc<dyn Vfs>` and never
-//! touches `std::fs` directly (see `super::real` for the one implementation
-//! that does) — the rest of `fs`'s code (hidden-file filtering, icon
-//! lookup, sorting, the meta/raw preview toggles) is policy that applies
-//! the same way no matter where the bytes actually come from, so none of
-//! it needs to change if a future node source wants the same browsing/
-//! preview behavior over something that isn't the real filesystem at all
-//! (e.g. the contents of a zip file, addressed the same way a directory
-//! tree would be).
+//! touches `std::fs` directly (see `super::real` for the implementation that
+//! does, and `crate::zip::ZipVfs` for one that doesn't) — the rest of
+//! `fs`'s code (hidden-file filtering, icon lookup, sorting, the meta/raw
+//! preview toggles) is policy that applies the same way no matter where the
+//! bytes actually come from.
 //!
 //! Every method here mirrors a real filesystem primitive closely enough
 //! that a real-fs-backed implementation is a thin wrapper (see
@@ -73,12 +70,11 @@ pub struct DirEntryInfo {
 }
 
 /// Abstracts every filesystem-shaped operation `fs` needs, so `FsSource`
-/// can be pointed at something other than the real, local filesystem in
-/// the future (the motivating example being a zip archive: browsable and
-/// previewable the same way a directory tree is, without extracting it to
-/// disk first). [`super::real::RealVfs`] is the only implementation
-/// today, and is what `FsSource::new` uses by default; a hypothetical
-/// zip-backed one would go through `FsSource::with_vfs` instead.
+/// can be pointed at something other than the real, local filesystem —
+/// e.g. `crate::zip`'s `ZipVfs`, which browses a zip archive's contents the
+/// same way a directory tree would be, without extracting it to disk first.
+/// [`super::real::RealVfs`] is what `FsSource::new` uses by default; any
+/// other implementation goes through `FsSource::with_vfs` instead.
 ///
 /// Every method takes a `Path` scoped by the caller (see
 /// `FsSource::path_from_segments`) — a `Vfs` implementation has no

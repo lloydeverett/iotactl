@@ -1,8 +1,8 @@
-//! The one [`Vfs`] implementation that exists today: every method
-//! backed by a real `std::fs`/`tokio::fs` call against the local
-//! filesystem. Kept separate from `vfs`'s trait definition, and from
-//! `super`'s browsing/preview logic, so both stay entirely free of real
-//! I/O — see `vfs`'s module docs for why that separation is the point.
+//! The [`Vfs`] implementation backed by the real, local filesystem: every
+//! method is a direct `std::fs`/`tokio::fs` call. Kept separate from `vfs`'s
+//! trait definition, and from `super`'s browsing/preview logic, so both stay
+//! entirely free of real I/O — see `vfs`'s module docs for why that
+//! separation is the point.
 
 use std::fs;
 use std::io::{self, Read};

@@ -270,11 +270,11 @@ fn draw_columns(f: &mut Frame, area: Rect, app: &mut App) {
 
         let selected = column.selected;
 
-        // The selected row's label text switches to this color, same as
-        // before — but baked directly into that one row's label span below
-        // rather than via `highlight_style`'s `fg`, which patches *every*
-        // cell in the row uniformly (icon included) and would otherwise
-        // overwrite the icon's own color whenever its row is selected.
+        // The selected row's label text switches to this color, baked
+        // directly into that one row's label span below rather than applied
+        // via `highlight_style`'s `fg`, which would patch every cell in the
+        // row uniformly (icon included) and overwrite the icon's own color
+        // whenever its row is selected.
         let selected_label_fg = if is_focused {
             Color::Rgb(235, 240, 245)
         } else {
