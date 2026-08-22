@@ -33,3 +33,4 @@ tree-sitter-ruby = "0.23"
 tree-sitter-md = "0.5"
 arborium-dockerfile = "2.18"
 zip = { version = "8", default-features = false, features = ["deflate", "deflate64", "bzip2", "lzma", "xz", "zstd", "ppmd"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }

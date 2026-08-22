@@ -6,6 +6,7 @@ mod entry;
 mod entry_preview;
 mod fs;
 mod highlight;
+mod json;
 mod manual;
 mod node_source;
 mod registry;

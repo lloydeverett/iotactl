@@ -10,6 +10,7 @@ use std::io;
 use std::sync::Arc;
 
 use crate::fs;
+use crate::json;
 use crate::manual;
 use crate::node_source::{NodeSource, NodeSourceType};
 use crate::zip;
@@ -20,6 +21,7 @@ pub static NODE_SOURCE_TYPES: &[&NodeSourceType] = &[
     &manual::NODE_SOURCE_TYPE,
     &fs::NODE_SOURCE_TYPE,
     &zip::NODE_SOURCE_TYPE,
+    &json::NODE_SOURCE_TYPE,
 ];
 
 /// Whether *some* known node source type — not necessarily the one
