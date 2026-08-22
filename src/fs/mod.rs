@@ -82,13 +82,16 @@ pub static NODE_SOURCE_TYPE: NodeSourceType = NodeSourceType {
         },
     ],
     construct_fn: |_scheme, rest, pipe| {
-        if pipe.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "file:// can't be piped into from another node source",
-            ));
-        }
-        Ok(Arc::new(FsSource::new(rest)?))
+        let rest = rest.to_string();
+        Box::pin(async move {
+            if pipe.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "file:// can't be piped into from another node source",
+                ));
+            }
+            Ok(Arc::new(FsSource::new(&rest)?) as Arc<dyn NodeSource>)
+        })
     },
     set_toggle_fn: |toggle, value| {
         if toggle.name == HIDDEN_TOGGLE_NAME {

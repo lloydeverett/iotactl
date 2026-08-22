@@ -99,14 +99,14 @@ fn split_pipe_segments(path_arg: &str) -> Vec<String> {
 /// `construct_scheme` is only ever reached for something that already
 /// [`looks_like_uri`], so a `segment` matching no scheme is a typo or an
 /// unsupported scheme, never an ordinary path.
-fn construct_scheme(
+async fn construct_scheme(
     segment: &str,
     pipe: Option<Arc<dyn NodeSource>>,
 ) -> io::Result<(Arc<dyn NodeSource>, &'static NodeSourceType)> {
     for &source_type in NODE_SOURCE_TYPES {
         for &scheme in source_type.schemes {
             if let Some(rest) = segment.strip_prefix(scheme) {
-                return Ok((source_type.construct(scheme, rest, pipe)?, source_type));
+                return Ok((source_type.construct(scheme, rest, pipe).await?, source_type));
             }
         }
     }
@@ -131,11 +131,12 @@ fn construct_scheme(
 /// together with `|`: [`split_pipe_segments`] breaks it into pieces, each
 /// constructed in turn via [`construct_scheme`] and handed the previous
 /// segment's freshly built source as its `pipe` — so
-/// `"file://x.zip | zip://foo.txt"` builds the `file://` source first, then
-/// builds the `zip://` source with that `file://` source as its `pipe`
-/// (unimplemented today, see `crate::zip`, but already reachable through
-/// this path). The final segment's source is what's returned. A single,
-/// unpiped `path_arg` is just the one-segment case of the same loop.
+/// `"file://x.zip | zip://"` builds the `file://` source first, then builds
+/// the `zip://` source with that `file://` source as its `pipe` (see
+/// `crate::zip::source`, which awaits the piped-in source's bytes before it
+/// can parse them as an archive — the reason this whole function is async).
+/// The final segment's source is what's returned. A single, unpiped
+/// `path_arg` is just the one-segment case of the same loop.
 ///
 /// A `path_arg` that doesn't look like a URI at all skips every bit of the
 /// above — no splitting, no `||` decoding, `|` is just an ordinary
@@ -152,17 +153,17 @@ fn construct_scheme(
 /// same-named file or directory in the current directory). Instead this
 /// fails fast with an error naming the unrecognized scheme and what's
 /// actually available.
-pub fn create(path_arg: &str) -> io::Result<(Arc<dyn NodeSource>, &'static NodeSourceType)> {
+pub async fn create(path_arg: &str) -> io::Result<(Arc<dyn NodeSource>, &'static NodeSourceType)> {
     if !looks_like_uri(path_arg) {
         return Ok((
-            fs::NODE_SOURCE_TYPE.construct("file://", path_arg, None)?,
+            fs::NODE_SOURCE_TYPE.construct("file://", path_arg, None).await?,
             &fs::NODE_SOURCE_TYPE,
         ));
     }
     let mut pipe: Option<Arc<dyn NodeSource>> = None;
     let mut built: Option<(Arc<dyn NodeSource>, &'static NodeSourceType)> = None;
     for segment in split_pipe_segments(path_arg) {
-        let (source, source_type) = construct_scheme(&segment, pipe.take())?;
+        let (source, source_type) = construct_scheme(&segment, pipe.take()).await?;
         pipe = Some(Arc::clone(&source));
         built = Some((source, source_type));
     }
@@ -193,9 +194,9 @@ mod tests {
         assert!(!looks_like_uri("9p://host/path"));
     }
 
-    #[test]
-    fn create_rejects_an_unrecognized_scheme_instead_of_falling_back_to_fs() {
-        let Err(err) = create("bogus://something") else {
+    #[tokio::test]
+    async fn create_rejects_an_unrecognized_scheme_instead_of_falling_back_to_fs() {
+        let Err(err) = create("bogus://something").await else {
             panic!("expected create() to fail for an unrecognized scheme");
         };
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
@@ -219,20 +220,20 @@ mod tests {
         assert_eq!(split_pipe_segments("a|||b"), vec!["a|", "b"]);
     }
 
-    #[test]
-    fn create_does_not_split_on_pipe_for_a_plain_filesystem_path() {
+    #[tokio::test]
+    async fn create_does_not_split_on_pipe_for_a_plain_filesystem_path() {
         // Not a URI at all, so `|` is just an ordinary filename character —
         // this should try (and fail) to open a single literal path rather
         // than being split into pipe segments.
-        let Err(err) = create("some/nonexistent|path") else {
+        let Err(err) = create("some/nonexistent|path").await else {
             panic!("expected create() to fail opening a nonexistent path");
         };
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
-    #[test]
-    fn create_rejects_a_pipe_into_a_type_that_does_not_support_it() {
-        let Err(err) = create("manual:// | manual://") else {
+    #[tokio::test]
+    async fn create_rejects_a_pipe_into_a_type_that_does_not_support_it() {
+        let Err(err) = create("manual:// | manual://").await else {
             panic!("expected create() to fail piping into manual://");
         };
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
@@ -242,26 +243,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn create_rejects_zip_with_nothing_piped_into_it() {
-        let Err(err) = create("zip://foo.txt") else {
+    #[tokio::test]
+    async fn create_rejects_zip_with_nothing_piped_into_it() {
+        let Err(err) = create("zip://foo.txt").await else {
             panic!("expected create() to fail constructing zip:// with no pipe");
         };
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
-    #[test]
-    fn create_pipes_a_constructed_source_into_the_next_segment() {
-        // zip:// is only a stub today, but reaching its "not implemented"
-        // error (rather than "nothing to read on its own") proves the
-        // manual:// source it's piped from was built and handed over.
-        let Err(err) = create("manual:// | zip://foo.txt") else {
-            panic!("expected create() to fail on the unimplemented zip:// stub");
+    #[tokio::test]
+    async fn create_pipes_a_constructed_source_into_the_next_segment() {
+        // `manual://` always constructs successfully, but its bytes are
+        // never a valid zip archive — see `crate::zip::source` for the
+        // deeper, archive-mounting tests. Reaching a zip-parsing error here
+        // (rather than "nothing to read on its own") is what proves the
+        // `manual://` source this pipes from was actually built and its
+        // bytes handed over to `zip://`, exercising `create`'s generic
+        // pipe-chaining regardless of which node source types exist.
+        let Err(err) = create("manual:// | zip://").await else {
+            panic!("expected create() to fail parsing manual:// output as a zip archive");
         };
-        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
-        assert!(
-            err.to_string().contains("not implemented"),
-            "message was: {err}"
+        assert_ne!(
+            err.kind(),
+            io::ErrorKind::InvalidInput,
+            "expected a zip-parsing error, got: {err}"
         );
     }
 }

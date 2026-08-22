@@ -208,7 +208,7 @@ async fn run_iotactl() -> io::Result<()> {
     let mouse = cli.mouse && !cli.no_mouse;
 
     let (tx, rx) = mpsc::unbounded_channel::<AppUpdate>();
-    let (source, source_type) = registry::create(&path_arg)?;
+    let (source, source_type) = registry::create(&path_arg).await?;
     let app = App::new(Vec::new(), source, source_type, tx, &toggle_overrides).await;
 
     let mut terminal = setup_terminal(mouse)?;

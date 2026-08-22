@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -238,14 +239,28 @@ pub struct NodeSourceType {
     /// `pipe` is the node source that piped into this one — `Some` when
     /// this segment wasn't the first in a `|`-delimited path (see
     /// [`crate::registry::create`]'s pipe-parsing), `None` otherwise. Only
-    /// some types make sense as a pipe's destination (e.g. a future
-    /// `zip://`, whose bytes have to come from somewhere); a type that
-    /// doesn't should reject a `Some` here rather than silently ignoring
-    /// it, and a type that *requires* piping (nothing to browse on its
-    /// own) should reject `None` the same way. `fs` and `manual` both
-    /// reject `Some`.
-    pub(crate) construct_fn:
-        fn(&str, &str, Option<Arc<dyn NodeSource>>) -> io::Result<Arc<dyn NodeSource>>,
+    /// some types make sense as a pipe's destination (e.g. `zip://`, whose
+    /// bytes have to come from somewhere); a type that doesn't should
+    /// reject a `Some` here rather than silently ignoring it, and a type
+    /// that *requires* piping (nothing to browse on its own) should reject
+    /// `None` the same way. `fs` and `manual` both reject `Some`; `zip`
+    /// rejects `None` (see `crate::zip::source`).
+    ///
+    /// Returns a boxed, `'static` future rather than being an `async fn`
+    /// itself: `construct_fn` is a plain, non-capturing `fn` pointer (each
+    /// type's `NODE_SOURCE_TYPE` is a `static`, which can't hold an opaque
+    /// per-type `async fn` type), so this is the usual way to make a `fn`
+    /// pointer field support `async`/`.await`. A type whose construction
+    /// is genuinely synchronous (`fs`, `manual`) just wraps its work in
+    /// `Box::pin(async move { ... })` to satisfy the signature; only a type
+    /// that actually needs to await something — `zip`, reading its piped-in
+    /// source's bytes before it can parse them as an archive — pays for
+    /// the `Box`.
+    pub(crate) construct_fn: fn(
+        &str,
+        &str,
+        Option<Arc<dyn NodeSource>>,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Arc<dyn NodeSource>>> + Send>>,
     /// Sets `toggle` (one of this type's own `toggles`) to `value`.
     pub(crate) set_toggle_fn: fn(&Toggle, bool) -> io::Result<()>,
     /// Reads the current value of `toggle` (one of this type's own
@@ -255,13 +270,13 @@ pub struct NodeSourceType {
 
 impl NodeSourceType {
     /// See `construct_fn`'s docs.
-    pub fn construct(
+    pub async fn construct(
         &self,
         scheme: &str,
         rest: &str,
         pipe: Option<Arc<dyn NodeSource>>,
     ) -> io::Result<Arc<dyn NodeSource>> {
-        (self.construct_fn)(scheme, rest, pipe)
+        (self.construct_fn)(scheme, rest, pipe).await
     }
 
     /// Whether this type exposes a toggle named `name` — as opposed to
