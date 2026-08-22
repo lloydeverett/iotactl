@@ -12,6 +12,7 @@ mod registry;
 mod sanitize;
 mod toggle;
 mod ui;
+mod zip;
 
 use std::env;
 use std::io::{self, Stdout};
