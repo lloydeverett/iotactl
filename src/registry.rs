@@ -21,7 +21,8 @@ pub static NODE_SOURCE_TYPES: &[&NodeSourceType] = &[
     &manual::NODE_SOURCE_TYPE,
     &fs::NODE_SOURCE_TYPE,
     &zip::NODE_SOURCE_TYPE,
-    &json::NODE_SOURCE_TYPE,
+    &json::JSON_NODE_SOURCE_TYPE,
+    &json::JSONL_NODE_SOURCE_TYPE,
 ];
 
 /// Whether *some* known node source type — not necessarily the one

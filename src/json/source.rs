@@ -17,8 +17,8 @@ use crate::streams::{ByteStream, SeekableByteStream};
 /// Bound on how much of a leaf value's pretty-printed text
 /// [`preview_value`] will syntax-highlight and show. The whole document is
 /// already fully parsed into memory by the time any preview runs (see
-/// `NODE_SOURCE_TYPE`'s `construct_fn`), so this isn't about avoiding a big
-/// read the way `fs::PREVIEW_READ_LIMIT` is — it's just to keep a
+/// `JSON_NODE_SOURCE_TYPE`'s `construct_fn`), so this isn't about avoiding a
+/// big read the way `fs::PREVIEW_READ_LIMIT` is — it's just to keep a
 /// pathologically large embedded string (or a huge subtree opened as a
 /// single value) from costing a real tree-sitter highlight pass and a
 /// giant `Text` no preview pane could usefully show anyway.
@@ -30,9 +30,9 @@ const PREVIEW_TEXT_LIMIT: usize = 64 * 1024;
 const SYNTHETIC_VALUE_PATH: &str = "value.json";
 
 /// This type's contribution to [`crate::registry::NODE_SOURCE_TYPES`].
-pub static NODE_SOURCE_TYPE: NodeSourceType = NodeSourceType {
+pub static JSON_NODE_SOURCE_TYPE: NodeSourceType = NodeSourceType {
     schemes: &["json://"],
-    manual_page: Some(&super::manual::MANUAL_PAGE),
+    manual_page: Some(&super::manual::JSON_MANUAL_PAGE),
     commands: &[],
     toggles: &[],
     construct_fn: |_scheme, rest, pipe| {
@@ -71,6 +71,81 @@ pub static NODE_SOURCE_TYPE: NodeSourceType = NodeSourceType {
         ))
     },
 };
+
+/// This type's contribution to [`crate::registry::NODE_SOURCE_TYPES`]. Reads
+/// a [JSON Lines](https://jsonlines.org/) document — one JSON value per
+/// line — rather than a single JSON document, but otherwise behaves exactly
+/// like [`JSON_NODE_SOURCE_TYPE`]: once [`parse_jsonl`] has turned the lines
+/// into a `Value::Array`, browsing, previewing, and re-serializing a node all
+/// go through the same [`JsonSource`] the `json://` scheme uses, with each
+/// line addressed by its position (`jsonl://0`, `jsonl://1`, ...) the same
+/// way a JSON array's positions are.
+pub static JSONL_NODE_SOURCE_TYPE: NodeSourceType = NodeSourceType {
+    schemes: &["jsonl://"],
+    manual_page: Some(&super::manual::JSONL_MANUAL_PAGE),
+    commands: &[],
+    toggles: &[],
+    construct_fn: |_scheme, rest, pipe| {
+        let rest = rest.to_string();
+        Box::pin(async move {
+            let Some(pipe) = pipe else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "jsonl:// has nothing to read on its own — pipe another node \
+                     source's bytes into it, e.g. \"file://data.jsonl | jsonl://\"",
+                ));
+            };
+            let mut stream = pipe.open(&[]).await?;
+            let mut bytes = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut bytes).await?;
+            // Parsing is real CPU work for a large document — see
+            // `node_source::NodeSource`'s trait docs on keeping that off the
+            // render thread.
+            let value = tokio::task::spawn_blocking(move || parse_jsonl(&bytes))
+                .await
+                .map_err(|_| io::Error::other("panicked while parsing JSONL"))??;
+            Ok(Arc::new(JsonSource::new(value, &rest)?) as Arc<dyn NodeSource>)
+        })
+    },
+    set_toggle_fn: |toggle, _value| {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("the JSONL source has no toggle named {:?}", toggle.name),
+        ))
+    },
+    get_toggle_fn: |toggle| {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("the JSONL source has no toggle named {:?}", toggle.name),
+        ))
+    },
+};
+
+/// Parses a [JSON Lines](https://jsonlines.org/) document into one
+/// `Value::Array` element per line, in line order, so [`JsonSource`] can
+/// browse it exactly like a JSON array. A blank (whitespace-only) line is
+/// skipped rather than rejected, matching the common JSONL convention of
+/// tolerating a trailing newline at end of file. Any other line that fails
+/// to parse as a single JSON value fails the whole document, with the
+/// 1-indexed line number in the error so it's easy to find.
+fn parse_jsonl(bytes: &[u8]) -> io::Result<Value> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid UTF-8: {e}")))?;
+    let mut items = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid JSON on line {}: {e}", i + 1),
+            )
+        })?;
+        items.push(value);
+    }
+    Ok(Value::Array(items))
+}
 
 fn is_container(value: &Value) -> bool {
     matches!(value, Value::Object(_) | Value::Array(_))
@@ -121,11 +196,12 @@ fn error_text(msg: String) -> SanitizedText {
     SanitizedText::from_text(&msg, Style::default().fg(Color::Red))
 }
 
-/// Splits the CLI path's rest after `json://` into id segments — the same
-/// shape `NodeSource::read_dir` takes. Ignores empty segments (a leading,
-/// trailing, or doubled `/`), matching `manual::split_id`. A key that
-/// itself contains a literal `/` can't be addressed this way; see the
-/// manual page for the workaround (open at the root, then navigate in-app).
+/// Splits the CLI path's rest after `json://` or `jsonl://` into id
+/// segments — the same shape `NodeSource::read_dir` takes. Ignores empty
+/// segments (a leading, trailing, or doubled `/`), matching
+/// `manual::split_id`. A key that itself contains a literal `/` can't be
+/// addressed this way; see the manual page for the workaround (open at the
+/// root, then navigate in-app).
 fn split_id(rest: &str) -> Vec<String> {
     rest.split('/').filter(|s| !s.is_empty()).map(str::to_string).collect()
 }
@@ -164,11 +240,14 @@ fn truncate_to_char_boundary(s: &str, limit: usize) -> &str {
     &s[..end]
 }
 
-/// A `NodeSource` over a JSON document, fully parsed into memory once at
-/// construction (see [`NODE_SOURCE_TYPE`]'s `construct_fn`) and scoped to
-/// `root` — same idea as `manual::ManualSource` scoping itself into its
-/// fixed page tree, just with a document parsed from piped-in bytes instead
-/// of one baked into the binary.
+/// A `NodeSource` over a document already parsed into a single [`Value`],
+/// fully in memory, and scoped to `root` — same idea as
+/// `manual::ManualSource` scoping itself into its fixed page tree, just with
+/// a document parsed from piped-in bytes instead of one baked into the
+/// binary. Backs both [`JSON_NODE_SOURCE_TYPE`] (whose `construct_fn` parses
+/// `value` as one JSON document) and [`JSONL_NODE_SOURCE_TYPE`] (whose
+/// `construct_fn` builds `value` as a `Value::Array` via [`parse_jsonl`]) —
+/// from here on, both schemes browse, preview, and serialize identically.
 #[derive(Clone)]
 pub struct JsonSource {
     /// The whole parsed document. `Arc` so cloning a `JsonSource` (done
@@ -176,17 +255,18 @@ pub struct JsonSource {
     /// re-copies it.
     root_value: Arc<Value>,
     /// Absolute id (within `root_value`) this source is scoped to. `[]` for
-    /// plain `json://` (the whole document); e.g. `["some", "key"]` for
-    /// `json://some/key`.
+    /// an unscoped root (the whole document); e.g. `["some", "key"]` for
+    /// `json://some/key`, or `["0"]` for `jsonl://0`.
     root: Vec<String>,
 }
 
 impl JsonSource {
-    /// `root` (the CLI path's rest after `json://`) is split into id
-    /// segments and scopes this source the way `manual::ManualSource::new`'s
-    /// `root` parameter scopes a manual source: every id given to this
-    /// source afterward is resolved relative to it. Rejected eagerly if it
-    /// doesn't resolve within `value`, mirroring `ManualSource::new`
+    /// `root` (the CLI path's rest after `json://` or `jsonl://`) is split
+    /// into id segments and scopes this source the way
+    /// `manual::ManualSource::new`'s `root` parameter scopes a manual
+    /// source: every id given to this source afterward is resolved relative
+    /// to it. Rejected eagerly if it doesn't resolve within `value`,
+    /// mirroring `ManualSource::new`
     /// rejecting a nonexistent page the same way.
     fn new(value: Value, root: &str) -> io::Result<Self> {
         let root = split_id(root);
@@ -320,12 +400,63 @@ mod tests {
         JsonSource::new(value, rest)
     }
 
+    fn build_jsonl(jsonl: &str, rest: &str) -> io::Result<JsonSource> {
+        let value = parse_jsonl(jsonl.as_bytes())?;
+        JsonSource::new(value, rest)
+    }
+
     #[tokio::test]
     async fn construct_rejects_a_bare_json_scheme_with_no_pipe() {
-        let Err(err) = NODE_SOURCE_TYPE.construct("json://", "", None).await else {
+        let Err(err) = JSON_NODE_SOURCE_TYPE.construct("json://", "", None).await else {
             panic!("expected json:// with no pipe to fail");
         };
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn construct_rejects_a_bare_jsonl_scheme_with_no_pipe() {
+        let Err(err) = JSONL_NODE_SOURCE_TYPE.construct("jsonl://", "", None).await else {
+            panic!("expected jsonl:// with no pipe to fail");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn parse_jsonl_collects_one_array_item_per_line_in_order() {
+        let value = parse_jsonl(b"{\"a\": 1}\n{\"a\": 2}\n[1, 2, 3]\n").unwrap();
+        assert_eq!(value, serde_json::json!([{"a": 1}, {"a": 2}, [1, 2, 3]]));
+    }
+
+    #[test]
+    fn parse_jsonl_skips_blank_lines() {
+        let value = parse_jsonl(b"1\n\n   \n2\n").unwrap();
+        assert_eq!(value, serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn parse_jsonl_reports_the_line_number_of_a_malformed_line() {
+        let Err(err) = parse_jsonl(b"1\n2\nnot json\n3\n") else {
+            panic!("expected a malformed line to fail");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("line 3"), "message was: {err}");
+    }
+
+    #[tokio::test]
+    async fn jsonl_read_dir_lists_lines_as_array_positions() {
+        let source = build_jsonl("{\"a\": 1}\n{\"a\": 2}\n", "").unwrap();
+        let entries = source.read_dir(&[]).await.unwrap();
+        let names: Vec<_> = entries.iter().map(|e| e.name.clone()).collect();
+        assert_eq!(names, vec!["0", "1"]);
+        assert!(entries.iter().all(|e| e.is_dir), "each line here is an object, so should be a container");
+    }
+
+    #[tokio::test]
+    async fn jsonl_can_be_scoped_to_a_single_line() {
+        let source = build_jsonl("{\"a\": 1}\n{\"b\": 2}\n", "1").unwrap();
+        let entries = source.read_dir(&[]).await.unwrap();
+        let names: Vec<_> = entries.iter().map(|e| e.name.clone()).collect();
+        assert_eq!(names, vec!["b"]);
     }
 
     #[tokio::test]
