@@ -16,7 +16,7 @@
 
 use std::io;
 
-use crate::registry::NodeSourceType;
+use crate::node_source::NodeSourceType;
 
 /// This type's contribution to [`crate::registry::NODE_SOURCE_TYPES`].
 pub static NODE_SOURCE_TYPE: NodeSourceType = NodeSourceType {

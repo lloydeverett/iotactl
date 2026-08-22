@@ -84,7 +84,7 @@ The meta toggle is off by default.";
 
 /// This source's contribution to the manual: itself as a top-level topic,
 /// with `OVERVIEW` and `TOGGLES` as its two pages. Handed to the manual node
-/// source only indirectly, via `crate::registry::NodeSourceType`.
+/// source only indirectly, via `crate::node_source::NodeSourceType`.
 pub static MANUAL_PAGE: ManualPage = ManualPage {
     slug: "filesystem",
     title: NAME,

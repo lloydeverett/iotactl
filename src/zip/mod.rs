@@ -7,7 +7,7 @@
 //! non-filesystem-based node sources.
 //!
 //! Alongside `Vfs`, this module contributes a `zip://`
-//! [`NodeSourceType`](crate::registry::NodeSourceType) (see [`source`]) —
+//! [`NodeSourceType`](crate::node_source::NodeSourceType) (see [`source`]) —
 //! for now just a stub, since the real thing needs
 //! [`ZipVfs`] wrapped in `crate::fs::FsSource::with_vfs` over a
 //! [`crate::node_source::SeekableByteStream`] piped in from another node

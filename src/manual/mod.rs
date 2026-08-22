@@ -14,7 +14,7 @@
 //! iotactl itself (e.g. navigation). A page that documents another node
 //! source type (e.g. the filesystem source) is instead contributed by that
 //! type itself and spliced into the tree via [`crate::registry`] — see
-//! [`crate::registry::NodeSourceType::manual_page`] — so this module never
+//! [`crate::node_source::NodeSourceType::manual_page`] — so this module never
 //! needs to know that other source types even exist, let alone how they
 //! work.
 
@@ -31,10 +31,9 @@ use crate::entry::Entry;
 use crate::entry_preview;
 use crate::highlight;
 use crate::node_source::{
-    ByteStream, Cancelled, ManualPage, NodeSource, Preview, SeekableByteStream,
+    ByteStream, Cancelled, ManualPage, NodeSource, NodeSourceType, Preview, SeekableByteStream,
 };
 use crate::registry;
-use crate::registry::NodeSourceType;
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 
@@ -128,7 +127,7 @@ static FIXED_ROOT_CHILDREN: &[&ManualPage] = &[
 
 /// The manual's page tree: `FIXED_ROOT_CHILDREN` above, plus one more
 /// top-level topic per node source type that has something to say about
-/// itself (see `crate::registry::NodeSourceType::manual_page`). Built
+/// itself (see `crate::node_source::NodeSourceType::manual_page`). Built
 /// lazily, once, on first access — a plain `static` can't splice a
 /// registry-provided list into a compile-time array the way this does.
 static ROOT: LazyLock<ManualPage> = LazyLock::new(|| {

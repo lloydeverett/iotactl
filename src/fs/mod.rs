@@ -12,8 +12,9 @@ use crate::command::Command;
 use crate::entry::Entry;
 use crate::entry_preview;
 use crate::highlight;
-use crate::node_source::{ByteStream, Cancelled, NodeSource, Preview, SeekableByteStream};
-use crate::registry::NodeSourceType;
+use crate::node_source::{
+    ByteStream, Cancelled, NodeSource, NodeSourceType, Preview, SeekableByteStream,
+};
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 

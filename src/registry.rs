@@ -9,100 +9,10 @@
 use std::io;
 use std::sync::Arc;
 
-use crate::command::Command;
 use crate::fs;
 use crate::manual;
-use crate::node_source::{ManualPage, NodeSource};
-use crate::toggle::Toggle;
+use crate::node_source::{NodeSource, NodeSourceType};
 use crate::zip;
-
-/// Describes one kind of node source iotactl can browse, independent of
-/// any particular instance of it.
-///
-/// Toggle get/set live here rather than on [`NodeSource`] because toggle
-/// state, for every source type iotactl currently has, is process-global
-/// (see e.g. `fs`'s module-level `SHOW_HIDDEN`) — there's only ever one
-/// source in use at a time, so there's nothing per-instance to hold. That
-/// also means a toggle name can be validated (e.g. a `--toggle-on NAME` at
-/// startup — see `crate::app::App::new`) against every registered type at
-/// once, via [`toggle_known`], without constructing any of them.
-pub struct NodeSourceType {
-    /// URI schemes that select this type on the CLI path (e.g.
-    /// `"manual://"`), matched by prefix — [`create`] hands both the
-    /// matched scheme and the rest of the path to `construct`. The
-    /// filesystem type's own scheme (`"file://"`) is optional: `create`
-    /// falls back to it, with the path given unaltered as `rest`, when
-    /// nothing else matches and the path doesn't otherwise look like a URI
-    /// (see [`looks_like_uri`]).
-    pub schemes: &'static [&'static str],
-    /// Manual content this type contributes about itself, embedded as a
-    /// top-level topic in the manual's page tree (see [`crate::manual`]).
-    /// `None` for a type that doesn't describe itself there — the manual
-    /// type itself, whose own pages already are the manual.
-    pub manual_page: Option<&'static ManualPage>,
-    /// The commands this type of source makes available, independent of
-    /// any particular node. Not yet invoked anywhere.
-    pub commands: &'static [Command],
-    /// The toggles this type of source makes available, independent of
-    /// any particular node.
-    pub toggles: &'static [Toggle],
-    /// Builds this type's source given the scheme that selected it (e.g.
-    /// `"file://"`, always non-empty and one of this type's own `schemes`
-    /// even when the CLI path itself had none — see [`create`]'s fallback)
-    /// and the rest of the CLI path after that scheme. Handing both pieces
-    /// over, rather than a single pre-stripped string, keeps `create` from
-    /// having to special-case how much of the path a given type gets to
-    /// see; it's this function's own job to decide what to do with them.
-    /// Any finer addressing within the source than just picking which type
-    /// to use (e.g. `manual://filesystem` picking a page, not just the
-    /// manual type) is the source's own job to bake into its scope at
-    /// construction — see `ManualSource::new`'s `root` parameter — not
-    /// something `construct` reports back out.
-    ///
-    /// `pipe` is the node source that piped into this one — `Some` when
-    /// this segment wasn't the first in a `|`-delimited path (see
-    /// [`create`]'s pipe-parsing), `None` otherwise. Only some types make
-    /// sense as a pipe's destination (e.g. a future `zip://`, whose bytes
-    /// have to come from somewhere); a type that doesn't should reject a
-    /// `Some` here rather than silently ignoring it, and a type that
-    /// *requires* piping (nothing to browse on its own) should reject
-    /// `None` the same way. `fs` and `manual` both reject `Some`.
-    pub(crate) construct_fn:
-        fn(&str, &str, Option<Arc<dyn NodeSource>>) -> io::Result<Arc<dyn NodeSource>>,
-    /// Sets `toggle` (one of this type's own `toggles`) to `value`.
-    pub(crate) set_toggle_fn: fn(&Toggle, bool) -> io::Result<()>,
-    /// Reads the current value of `toggle` (one of this type's own
-    /// `toggles`).
-    pub(crate) get_toggle_fn: fn(&Toggle) -> io::Result<bool>,
-}
-
-impl NodeSourceType {
-    /// See `construct_fn`'s docs.
-    pub fn construct(
-        &self,
-        scheme: &str,
-        rest: &str,
-        pipe: Option<Arc<dyn NodeSource>>,
-    ) -> io::Result<Arc<dyn NodeSource>> {
-        (self.construct_fn)(scheme, rest, pipe)
-    }
-
-    /// Whether this type exposes a toggle named `name` — as opposed to
-    /// [`toggle_known`], which checks every registered type at once.
-    pub fn has_toggle(&self, name: &str) -> bool {
-        self.toggles.iter().any(|t| t.name == name)
-    }
-
-    /// See `set_toggle_fn`'s docs.
-    pub fn set_toggle(&self, toggle: &Toggle, value: bool) -> io::Result<()> {
-        (self.set_toggle_fn)(toggle, value)
-    }
-
-    /// See `get_toggle_fn`'s docs.
-    pub fn get_toggle(&self, toggle: &Toggle) -> io::Result<bool> {
-        (self.get_toggle_fn)(toggle)
-    }
-}
 
 /// Every node source type iotactl knows how to construct, each contributed
 /// by its own module.

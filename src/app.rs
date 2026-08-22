@@ -8,8 +8,8 @@ use ratatui::widgets::{ListState, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use crate::entry::Entry;
-use crate::node_source::{Cancelled, NodeSource};
-use crate::registry::{self, NodeSourceType};
+use crate::node_source::{Cancelled, NodeSource, NodeSourceType};
+use crate::registry;
 use crate::sanitize::SanitizedText;
 use crate::toggle::Toggle;
 
