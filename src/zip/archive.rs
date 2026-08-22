@@ -230,6 +230,6 @@ impl Vfs for ZipVfs {
         let index = entry.archive_index;
         let make_stream: Box<dyn FnMut() -> ByteStream + Send> =
             Box::new(move || Box::pin(EntryStream::new(archive.clone(), index)) as ByteStream);
-        Ok(Box::pin(SimulatedSeek::new(make_stream, entry.size)))
+        Ok(Box::pin(SimulatedSeek::new(make_stream, entry.size)?))
     }
 }

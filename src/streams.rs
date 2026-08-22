@@ -68,15 +68,28 @@ pub mod simulated_seeking {
         /// `make_stream` must return a fresh stream reading from position 0
         /// each time it's called. `total_len` is the stream's full length,
         /// used to resolve `SeekFrom::End`.
-        pub fn new(mut make_stream: F, total_len: u64) -> Self {
+        ///
+        /// Refuses to construct unless `--allow-slow-pipes` was passed (see
+        /// [`crate::config::allow_slow_pipes`]): a seek backward here means
+        /// redoing whatever real work `make_stream` does from scratch (e.g.
+        /// decompression), a cost a node source shouldn't impose on a
+        /// caller without that caller opting in.
+        pub fn new(mut make_stream: F, total_len: u64) -> io::Result<Self> {
+            if !crate::config::allow_slow_pipes() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "construction requires random access but underlying stream is not \
+                     random access (see --allow-slow-pipes to permit simulated seeking)",
+                ));
+            }
             let inner = make_stream();
-            SimulatedSeek {
+            Ok(SimulatedSeek {
                 make_stream,
                 inner,
                 position: 0,
                 total_len,
                 seek_target: None,
-            }
+            })
         }
     }
 

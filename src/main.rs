@@ -76,6 +76,15 @@ struct Cli {
     /// Set a toggle off at startup (repeatable). See --toggle-on.
     #[arg(long = "toggle-off", value_name = "NAME")]
     toggle_off: Vec<String>,
+
+    /// Node source implementations characteristically avoid streaming large
+    /// buffers into memory, but this is impossible to avoid in the general
+    /// case for certain pipe configurations (e.g. `file://large.zip |
+    /// zip://big.zip | zip://`) without incurring computational cost (e.g.
+    /// due to repeated and frequent stream decompressions in the example).
+    /// Turning on this flag opts in to that cost.
+    #[arg(long, action = ArgAction::SetTrue)]
+    allow_slow_pipes: bool,
 }
 
 /// Arg ids (the derived `Cli` field names) allowed to be set via
@@ -91,6 +100,7 @@ const ENV_ALLOWED_ARGS: &[&str] = &[
     "no_mouse",
     "toggle_on",
     "toggle_off",
+    "allow_slow_pipes",
 ];
 
 /// Shell-word-splits `IOTACTL_FLAGS`, if set and non-empty.
@@ -205,7 +215,7 @@ async fn run_iotactl() -> io::Result<()> {
 
     let path_arg = cli.path.unwrap_or_else(|| ".".to_string());
 
-    config::init(cli.nerd_font && !cli.no_nerd_font);
+    config::init(cli.nerd_font && !cli.no_nerd_font, cli.allow_slow_pipes);
     let mouse = cli.mouse && !cli.no_mouse;
 
     let (tx, rx) = mpsc::unbounded_channel::<AppUpdate>();

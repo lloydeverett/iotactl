@@ -129,6 +129,14 @@ async fn open_streams_full_contents() {
 async fn open_seekable_can_seek_forward_and_backward() {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+    // `--allow-slow-pipes` gates simulated seeking (see
+    // `crate::streams::simulated_seeking`); `config::init` is `main`'s job
+    // in the real binary, so tests exercising this path have to do it
+    // themselves. Guarded by `Once` since it's a once-only global and more
+    // than one test in this binary could reach here.
+    static INIT_CONFIG: std::sync::Once = std::sync::Once::new();
+    INIT_CONFIG.call_once(|| crate::config::init(false, true));
+
     let vfs = open_test_vfs().await;
     let mut stream = vfs.open_seekable(Path::new("/a.txt")).await.unwrap();
 
