@@ -30,6 +30,12 @@ The source piped into `zip://` must support seeking. A real file does. A
 stream that only reads forward once, such as another process's output, does
 not.
 
+## Other file types
+
+Many common file types are zip archives with a different extension. `zip://`
+can open any of them the same way, for example: JAR (`file://x.jar | zip://`),
+DOCX/XLSX/PPTX, ODT/ODS/ODP, EPUB, and APK.
+
 ## Browsing and toggles
 
 Once mounted, an archive browses the same way the filesystem source does:
