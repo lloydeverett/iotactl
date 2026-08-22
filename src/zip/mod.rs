@@ -19,6 +19,7 @@ mod archive;
 mod bridge;
 mod entry_stream;
 mod index;
+mod manual;
 mod source;
 #[cfg(test)]
 mod tests;

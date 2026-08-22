@@ -33,7 +33,7 @@ use super::ZipVfs;
 /// zip-specific toggle state to add here.
 pub static NODE_SOURCE_TYPE: NodeSourceType = NodeSourceType {
     schemes: &["zip://"],
-    manual_page: None,
+    manual_page: Some(&super::manual::MANUAL_PAGE),
     commands: fs::NODE_SOURCE_TYPE.commands,
     toggles: fs::NODE_SOURCE_TYPE.toggles,
     construct_fn: |_scheme, rest, pipe| {

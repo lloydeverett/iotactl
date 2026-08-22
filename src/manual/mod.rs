@@ -279,15 +279,7 @@ A node source is a tree that iotactl can browse. Each node in the tree has:
 ## Why this design
 
 iotactl does not assume every tree is a set of real files. Each source decides
-what its nodes mean, and how to read them.
-
-## Sources in this build
-
-- Filesystem: real files and directories on disk. See the \"Filesystem\" topic.
-- Manual: this manual. See the topics at the top level of this tree.
-
-Only one source is active at a time, chosen by the PATH argument you pass to
-iotactl. See the \"Command-Line Options\" topic.";
+what its nodes mean, and how to read them.";
 
 /// Walks `id` down from the root, one segment per level, matching each
 /// segment against a child's `slug` (case-insensitively, so e.g. a
