@@ -25,4 +25,10 @@ Work through this checklist when adding a new `NodeSource` implementation (a new
 - **Keep nontrivial work off the render thread.** `async fn` alone doesn't make a call non-blocking — see `NodeSource`'s trait-level doc comment ("Do real work off the render thread"). Any real work — a directory listing, a file read, a syntax highlight, or any other computationally or IO-heavy operation that doesn't hit a genuine yield point on its own — must run inside `tokio::task::spawn_blocking`, with the `JoinHandle` `.await`ed and a panic mapped to a visible error rather than left to unwind into the caller. See `fs::FsSource::read_dir`/`preview_tui` for the pattern.
 - **Let the source be rooted at a node of the caller's choosing**, not always its outermost/default node. Scope the starting point at construction, the way `fs::FsSource::new`'s `root` parameter pins a real directory or `manual::ManualSource::new`'s `root` parameter pins a page (e.g. `manual://filesystem` roots the manual at the Filesystem topic instead of the top level). `id == []` passed to any `NodeSource` method should always mean "this instance's own configured root", never some fixed absolute root.
 - **Stream functionality should be offered based on the intrinsic capabilities of the underlying store.** If there underlying streams are by nature not random access, for instance, use the simulated random access implemented in `streams.rs`. (Or, if that seems inappropriate, then there is always the option of not implementing random access at all. Consider confirming with the user.)
+- **Use pipes when it makes sense.** Paths should index into nodes in which the node source
+specializes. So, a `zip://foobar` tells the ZIP node source to reach for `foobar` *inside the zip*,
+but a pipe is used to tell the source which ZIP file to read. Notice that this pattern abstracts
+away dependence on how and where the underlying data is stored and ensures there is a clear
+distinction between an index into the node tree itself (`./foobar` in this case) and the location
+of the node store itself (the ZIP file, in this case).
 
