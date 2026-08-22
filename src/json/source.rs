@@ -145,9 +145,8 @@ fn child_entry(id: &[String], name: String, value: &Value) -> Entry {
     }
 }
 
-/// Pretty-prints and syntax-highlights `value` as the preview for a leaf
-/// node. Only ever called with a scalar — a container's preview is its
-/// child listing instead (see `JsonSource::preview_sync`).
+/// Pretty-prints and syntax-highlights `value` (a whole subtree, or a
+/// scalar) as a node's preview.
 fn preview_value(value: &Value) -> SanitizedText {
     let pretty = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
     let truncated = truncate_to_char_boundary(&pretty, PREVIEW_TEXT_LIMIT);
@@ -226,17 +225,13 @@ impl JsonSource {
         let Some(value) = resolve(&self.root_value, &absolute) else {
             return Preview::new(error_text(no_such_node(&absolute).to_string()));
         };
-        if is_container(value) {
-            match self.read_dir_sync(id) {
-                Ok(entries) => Preview {
-                    text: entry_preview::format_dir_preview(&entries),
-                    override_disable_line_numbers: true,
-                },
-                Err(e) => Preview::new(error_text(e.to_string())),
-            }
-        } else {
-            Preview::new(preview_value(value))
-        }
+        // Both a container and a leaf preview the same way here: the node's
+        // full pretty-printed JSON, so an object or array can be read at a
+        // glance instead of needing to drill into each child just to see
+        // what it holds. Line numbers stay on (unlike `fs`/`manual`'s
+        // directory-listing previews, which turn them off) since this is
+        // real, indented multi-line text they correspond to.
+        Preview::new(preview_value(value))
     }
 
     fn serialize_sync(&self, id: &[String]) -> io::Result<Vec<u8>> {
@@ -431,12 +426,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preview_of_a_container_lists_its_children() {
-        crate::config::ensure_initialized_for_tests();
-        let source = build(r#"{"a": 1, "b": 2}"#, "").unwrap();
+    async fn preview_of_a_container_shows_its_full_pretty_printed_subtree() {
+        let source = build(r#"{"a": 1, "b": {"c": 2}}"#, "").unwrap();
         let preview = source.preview_tui(&[], &Cancelled::new()).await;
-        assert!(preview.override_disable_line_numbers);
-        assert_eq!(preview.text.plain().lines().count(), 2);
+        assert!(!preview.override_disable_line_numbers);
+        assert_eq!(preview.text.plain(), "{\n  \"a\": 1,\n  \"b\": {\n    \"c\": 2\n  }\n}");
     }
 
     #[tokio::test]

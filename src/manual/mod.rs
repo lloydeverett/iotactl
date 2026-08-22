@@ -193,6 +193,20 @@ PATH sets where iotactl starts browsing.
 - Give `manual://` followed by a topic's id (e.g. `manual://filesystem`) to
   open the manual there instead of at its top level.
 
+## Piping between sources
+
+Chain sources with `|`, for example `file://archive.zip | zip://`. Each part
+builds a source and feeds it into the next.
+
+The leftmost part may drop its scheme: `archive.zip | zip://` means the same
+thing, since a bare path can only ever be a filesystem path. Every other part
+needs an explicit scheme — `archive.zip | inner.zip` is rejected, since
+`inner.zip` names no scheme to build.
+
+Because of this, a `|` always marks a new part of the pipeline. If a real file
+name contains a `|`, write it twice (`||`) to keep it as one literal
+character.
+
 ## Nerd Font icons
 
 - `--nerd-font` shows an icon next to each entry. Your terminal font must

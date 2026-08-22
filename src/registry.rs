@@ -57,10 +57,10 @@ fn looks_like_uri(path_arg: &str) -> bool {
 }
 
 /// Splits `path_arg` on unescaped `|` characters into pipe segments — see
-/// [`create`]'s docs for the overall scheme this supports. Only ever called
-/// on a `path_arg` that [`looks_like_uri`]; the fallback filesystem case
-/// never splits on `|` at all, so a real filename containing one is never
-/// mangled there.
+/// [`create`]'s docs for the overall scheme this supports. Called on every
+/// `path_arg`, whether or not it [`looks_like_uri`]: a `|` always separates
+/// pipe segments now, so a literal `|` in an ordinary filename needs
+/// doubling the same as one inside a URI segment does.
 ///
 /// A `|` is a segment boundary unless doubled (`||`), which decodes to one
 /// literal `|` within a segment instead — the only way to address a node
@@ -128,21 +128,29 @@ async fn construct_scheme(
 /// Constructs the node source for `path_arg`, alongside the
 /// [`NodeSourceType`] that turned out to describe it.
 ///
-/// A `path_arg` that [`looks_like_uri`] may chain sources with `|`:
-/// [`split_pipe_segments`] breaks it into pieces, each built in turn via
-/// [`construct_scheme`] and handed the previous segment's source as its
-/// `pipe` (so `"file://x.zip | zip://"` builds `file://` first, then
-/// `zip://` piped from it). The final segment's source is returned. A
-/// segment that [`looks_like_uri`] but matches no registered scheme fails
-/// fast instead of falling through to the filesystem type — that would just
-/// fail later as a nonsense path, or silently succeed against an unrelated
-/// same-named file.
+/// `path_arg` may chain sources with `|`: [`split_pipe_segments`] breaks it
+/// into pieces, each built in turn and handed the previous segment's source
+/// as its `pipe` (so `"file://x.zip | zip://"` builds `file://` first, then
+/// `zip://` piped from it). The final segment's source is returned.
 ///
-/// A `path_arg` that doesn't look like a URI at all is never split on `|` —
-/// it falls straight through to the filesystem type, with the whole string
-/// as its path.
+/// Every segment needs an explicit scheme (via [`construct_scheme`]) except
+/// the leftmost one, which may omit it — `"x.zip | zip://"` is shorthand for
+/// `"file://x.zip | zip://"` — since a bare path can only ever mean a real
+/// filesystem path, never some other scheme's. A later segment that omits
+/// its scheme is rejected instead of guessed at: `"x.zip | y.zip"` doesn't
+/// mean anything (`y.zip` isn't a scheme `y` piped nothing named `.zip`, nor
+/// a filesystem path — there's nothing upstream of it to read a plain path
+/// against). A segment that [`looks_like_uri`] but matches no registered
+/// scheme also fails fast, rather than falling through to the filesystem
+/// type — that would just fail later as a nonsense path, or silently
+/// succeed against an unrelated same-named file.
+///
+/// Splitting on `|` happens unconditionally, so a filename that genuinely
+/// contains a `|` must double it (`||`) to survive — see
+/// [`split_pipe_segments`].
 pub async fn create(path_arg: &str) -> io::Result<(Arc<dyn NodeSource>, &'static NodeSourceType)> {
-    if !looks_like_uri(path_arg) {
+    let segments = split_pipe_segments(path_arg);
+    if segments.len() == 1 && !looks_like_uri(path_arg) {
         return Ok((
             fs::NODE_SOURCE_TYPE.construct("file://", path_arg, None).await?,
             &fs::NODE_SOURCE_TYPE,
@@ -150,8 +158,24 @@ pub async fn create(path_arg: &str) -> io::Result<(Arc<dyn NodeSource>, &'static
     }
     let mut pipe: Option<Arc<dyn NodeSource>> = None;
     let mut built: Option<(Arc<dyn NodeSource>, &'static NodeSourceType)> = None;
-    for segment in split_pipe_segments(path_arg) {
-        let (source, source_type) = construct_scheme(&segment, pipe.take()).await?;
+    for (i, segment) in segments.iter().enumerate() {
+        let (source, source_type) = if looks_like_uri(segment) {
+            construct_scheme(segment, pipe.take()).await?
+        } else if i == 0 {
+            (
+                fs::NODE_SOURCE_TYPE.construct("file://", segment, None).await?,
+                &fs::NODE_SOURCE_TYPE,
+            )
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "\"{segment}\" has no scheme (only the leftmost part of a `|` \
+                     pipeline may omit one; if you meant a literal \"|\" in a file \
+                     name, escape it by doubling it: \"||\")"
+                ),
+            ));
+        };
         pipe = Some(Arc::clone(&source));
         built = Some((source, source_type));
     }
@@ -209,14 +233,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_does_not_split_on_pipe_for_a_plain_filesystem_path() {
-        // Not a URI at all, so `|` is just an ordinary filename character —
-        // this should try (and fail) to open a single literal path rather
-        // than being split into pipe segments.
-        let Err(err) = create("some/nonexistent|path").await else {
+    async fn create_treats_an_undoubled_pipe_as_a_segment_boundary_even_off_a_uri() {
+        // Not a URI at all, but `|` is always a segment boundary now unless
+        // doubled — this should be read as two segments, the second of
+        // which has no scheme and so is rejected outright rather than
+        // reaching the filesystem as a single literal path.
+        let Err(err) = create("Cargo.toml|path").await else {
+            panic!("expected create() to fail on a schemeless non-leftmost segment");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("||"), "message was: {err}");
+    }
+
+    #[tokio::test]
+    async fn create_reads_a_doubled_pipe_as_one_literal_pipe_in_a_plain_path() {
+        // Doubling survives even off a URI: this is a single segment whose
+        // literal name contains one `|`, so it's just a nonexistent
+        // filesystem path, not a two-segment pipeline.
+        let Err(err) = create("some/nonexistent||path").await else {
             panic!("expected create() to fail opening a nonexistent path");
         };
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn create_permits_a_schemeless_leftmost_segment_piped_into_a_scheme() {
+        // The leftmost segment may omit `file://` even when there's a pipe
+        // after it — "Cargo.toml | zip://" is shorthand for
+        // "file://Cargo.toml | zip://". Reaching a zip-parsing error (rather
+        // than "no scheme" or "nothing piped in") proves the shorthand
+        // segment was built as a filesystem source and piped forward.
+        let Err(err) = create("Cargo.toml | zip://").await else {
+            panic!("expected create() to fail parsing Cargo.toml as a zip archive");
+        };
+        assert_ne!(
+            err.kind(),
+            io::ErrorKind::InvalidInput,
+            "expected a zip-parsing error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_rejects_a_schemeless_non_leftmost_segment() {
+        // The shorthand is only for the leftmost segment: once there's
+        // something upstream, every later segment needs its own scheme.
+        let Err(err) = create("Cargo.toml | somefile.zip").await else {
+            panic!("expected create() to fail on a schemeless non-leftmost segment");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            err.to_string().contains("somefile.zip"),
+            "message was: {err}"
+        );
+        assert!(err.to_string().contains("||"), "message was: {err}");
     }
 
     #[tokio::test]
